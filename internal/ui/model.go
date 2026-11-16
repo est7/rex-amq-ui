@@ -122,6 +122,8 @@ type Model struct {
 
 	sel     map[Tab]int
 	retired bool // the Retired group is open
+	// owed is when each open obligation was first seen (owedSince).
+	owed map[string]time.Time
 
 	mail mailState
 	// graphAt is the replay cursor: the id of the message shown, "" for
@@ -207,6 +209,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // settle keeps the tab and selections valid after the state changed.
 func (m *Model) settle() {
+	m.trackOwed()
 	tabs := m.tabs()
 	if !m.tabSet && m.st.Ready() && m.personal() {
 		m.tab, m.tabSet = TabEpics, true

@@ -110,3 +110,30 @@ func TestOverviewScrollsToTheSelection(t *testing.T) {
 		t.Fatal(bad)
 	}
 }
+
+type movingClock struct{ t *time.Time }
+
+func (c movingClock) Now() time.Time { return *c.t }
+
+func TestObligationAgeAdvances(t *testing.T) {
+	now := time.Time(fixtures["edited-crew-attention"])
+	m := build(t, "edited-crew-attention", 176, 44, Deps{Clock: movingClock{&now}}, Options{})
+	owes := func() string {
+		for _, l := range lines(m.Frame()) {
+			if strings.Contains(l, "claude-02 owes claude-01") {
+				return strings.Fields(l)[len(strings.Fields(l))-1]
+			}
+		}
+		t.Fatalf("no obligation alert:\n%s", plain(m.Frame()))
+		return ""
+	}
+	// m1 was sent at 09:00; at 09:10 the request has waited 10 minutes.
+	if got := owes(); got != "10m" {
+		t.Fatalf("age %s at 09:10", got)
+	}
+	now = now.Add(10 * time.Minute)
+	m = step(t, m, adapter.FrameUpdate{Frame: adapter.Heartbeat{Header: next(m)}})
+	if got := owes(); got != "20m" {
+		t.Fatalf("age %s at 09:20: the adapter sends no upsert for an age change", got)
+	}
+}

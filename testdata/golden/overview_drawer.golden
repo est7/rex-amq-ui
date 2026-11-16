@@ -5,7 +5,7 @@
  ✕ implementer(claude-02) hit a turn error                        10m 
  ◷ narrator(pi-04) stalled                                         9m 
  ↩ bounced claude-01 → codex-03: review s1                         6m 
- ⧗ claude-02 owes claude-01 a request: build it                    6m 
+ ⧗ claude-02 owes claude-01 a request: build it                   10m 
                                                                       
  from narrator (pi-04) · 4m ago                                       
  claude-02 hit a turn error while wiring the token refresh; claude-01 

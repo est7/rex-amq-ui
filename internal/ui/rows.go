@@ -72,7 +72,7 @@ func (m Model) alerts() []alert {
 				continue
 			}
 			out = append(out, alert{kind: alertObligation, handle: o.OwedBy,
-				since: m.now().Add(-time.Duration(o.AgeSeconds) * time.Second),
+				since: m.owedSince(o),
 				text:  fmt.Sprintf("%s owes %s a %s: %s", o.OwedBy, o.OwedTo, o.Kind, o.Subject)})
 		}
 	}
@@ -309,4 +309,40 @@ func (m Model) replayIndex() (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// owedSince is when an obligation opened. The adapter sends its age as of
+// the view and no upsert when only the age changes, so the age is measured
+// from a fixed time: the request's envelope, else the view's as_of less the
+// age, else the time the panel first saw it (kept in Model.owed).
+func (m Model) owedSince(o adapter.Obligation) time.Time {
+	for _, msg := range m.st.Messages {
+		if msg.ID == o.Ref {
+			return msg.CreatedAt
+		}
+	}
+	if v := m.view(); v != nil && !v.AsOf.At.IsZero() {
+		return v.AsOf.At.Add(-time.Duration(o.AgeSeconds) * time.Second)
+	}
+	if t, ok := m.owed[o.Ref]; ok {
+		return t
+	}
+	return m.now().Add(-time.Duration(o.AgeSeconds) * time.Second)
+}
+
+// trackOwed records when each open obligation without another anchor was
+// first seen, and forgets those that closed.
+func (m *Model) trackOwed() {
+	v := m.view()
+	if v == nil {
+		m.owed = nil
+		return
+	}
+	owed := make(map[string]time.Time, len(v.Obligations))
+	for _, o := range v.Obligations {
+		if o.State == "open" {
+			owed[o.Ref] = m.owedSince(o)
+		}
+	}
+	m.owed = owed
 }
