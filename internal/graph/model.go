@@ -139,9 +139,6 @@ func (m *Model) SetPaused(p bool) { m.paused = p }
 // Select marks the node id selected ("" clears it).
 func (m *Model) Select(id string) { m.selected = id }
 
-// Selected is the selected node's id, "" when none is.
-func (m *Model) Selected() string { return m.selected }
-
 // NeedsAnimation reports whether the picture changes with time alone: a
 // shown member is working, or a pulse is under way on a drawn edge. It is
 // false while paused.

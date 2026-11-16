@@ -381,7 +381,7 @@ func TestSceneSelect(t *testing.T) {
 	m, _ := newModel()
 	m.Update(state([]adapter.Agent{agent("o", "orchestrator", "idle"), agent("i", "implementer", "idle")}, nil))
 	m.Select("i")
-	if m.Selected() != "i" || !node(t, m.Scene(board), "i").Selected || node(t, m.Scene(board), "o").Selected {
+	if !node(t, m.Scene(board), "i").Selected || node(t, m.Scene(board), "o").Selected {
 		t.Errorf("selection not reflected")
 	}
 }
