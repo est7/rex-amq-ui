@@ -1,13 +1,36 @@
 // Command rex-amq-ui is the human's floating Crew and Cockpit panel for a Rex
 // session. It reads `rex-amq-adapter panel --json` and drives its own
 // floating layer over Rex's control API.
+//
+//	rex-amq-ui [--session S] [--adapter-bin P] [--focus B] [--tab T] [--board]
+//	    the panel itself, run inside the floating layer's terminal block
+//	rex-amq-ui open [--session S] [--tab T] [--board] [--adapter-bin P]
+//	    the launcher: open the session's panel, or restore the open one,
+//	    print {"layer_id","block_id","restored"} as JSON, and exit
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
+
+	"github.com/est7/rex-amq-ui/internal/adapter"
+	"github.com/est7/rex-amq-ui/internal/apc"
+	"github.com/est7/rex-amq-ui/internal/layer"
+	"github.com/est7/rex-amq-ui/internal/rexctl"
+	"github.com/est7/rex-amq-ui/internal/ui"
 )
 
 // version is set at build time with -ldflags "-X main.version=<v>".
@@ -18,20 +41,202 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "open" {
+		return runOpen(args[1:], os.Getenv, stdout, stderr)
+	}
 	fs := flag.NewFlagSet("rex-amq-ui", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	showVersion := fs.Bool("version", false, "print the version and exit")
-	// --session and --adapter-bin are the panel's inputs; the panel itself
-	// arrives with the TUI views, so they are parsed but not used yet.
-	_ = fs.String("session", "", "watch Rex session `S` instead of the caller's")
-	_ = fs.String("adapter-bin", "", "rex-amq-adapter binary `path` (default: $REX_AMQ_ADAPTER_BIN, Homebrew, then PATH)")
+	session := fs.String("session", "", "watch Rex session `S` (default: $REX_SESSION)")
+	adapterBin := fs.String("adapter-bin", "", "rex-amq-adapter binary `path` (default: $REX_AMQ_ADAPTER_BIN, Homebrew, then PATH)")
+	focus := fs.String("focus", "", "the pane `block` the human was in when the panel opened")
+	tab := fs.String("tab", "", "the tab to show first: "+strings.Join(apc.Tabs, ", "))
+	board := fs.Bool("board", false, "the layer starts at Board size")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: rex-amq-ui [flags]        the panel (runs in its floating layer)")
+		fmt.Fprintln(stderr, "       rex-amq-ui open [flags]   open or restore the session's panel")
+		fs.PrintDefaults()
+	}
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *showVersion {
 		fmt.Fprintln(stdout, "rex-amq-ui", version)
 		return 0
 	}
-	fmt.Fprintln(stderr, "rex-amq-ui: the panel is not built yet; only --version works")
-	return 2
+	if *tab != "" && !slices.Contains(apc.Tabs, *tab) {
+		fmt.Fprintf(stderr, "rex-amq-ui: no tab %q (want one of %s)\n", *tab, strings.Join(apc.Tabs, ", "))
+		return 2
+	}
+	cfg := panelConfig{
+		Server: os.Getenv("REX_SERVER"), Session: cmp(*session, os.Getenv("REX_SESSION")), Block: os.Getenv("REX_BLOCK"),
+		AdapterBin: *adapterBin, Options: ui.Options{Tab: *tab, Focused: *focus},
+		In: os.Stdin, Out: stdout,
+	}
+	if *board {
+		cfg.Options.Size = layer.Board
+	}
+	if err := runPanel(context.Background(), cfg); err != nil {
+		fmt.Fprintln(stderr, "rex-amq-ui:", err)
+		return 1
+	}
+	return 0
+}
+
+func cmp(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// panelConfig is everything the panel reads from its process.
+type panelConfig struct {
+	Server, Session, Block string
+	AdapterBin             string
+	Options                ui.Options
+	In                     *os.File
+	Out                    io.Writer
+	// Size, when set, is the terminal's size (tests: the output is no
+	// terminal to ask).
+	Width, Height int
+}
+
+// runPanel runs the panel until the human quits it (Q).
+func runPanel(ctx context.Context, cfg panelConfig) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var ctl ui.Controller
+	var panel *layer.Panel
+	if cfg.Server != "" && cfg.Session != "" {
+		cctx, ccancel := context.WithTimeout(ctx, 5*time.Second)
+		p, err := layer.Connect(cctx, cfg.Server, cfg.Session, cfg.Block, cfg.Options.Focused)
+		ccancel()
+		if err == nil {
+			panel, ctl = p, p
+		}
+		// Without Rex the panel still shows the stream; its actions say
+		// "not connected to Rex".
+	}
+	cache, _ := os.UserCacheDir()
+	model := ui.New(ui.Deps{
+		Layer: ctl, Clock: ui.SystemClock{}, Exec: execTool, LookPath: exec.LookPath,
+		CacheDir: cache, Editor: os.Getenv("EDITOR"),
+	}, cfg.Options)
+
+	in := apc.NewReader(cfg.In)
+	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(cfg.Out),
+		// Every cell's background is the panel's surface integrity: never
+		// let NO_COLOR or a dumb TERM strip it.
+		tea.WithColorProfile(colorprofile.TrueColor)}
+	if cfg.Width > 0 && cfg.Height > 0 {
+		opts = append(opts, tea.WithWindowSize(cfg.Width, cfg.Height))
+	}
+	prog := tea.NewProgram(model, opts...)
+	in.On = func(c apc.Command) { prog.Send(c) }
+
+	var wg sync.WaitGroup
+	wg.Go(func() { stream(ctx, cfg, prog) })
+	if panel != nil {
+		wg.Go(func() { panel.Watch(ctx, func(s layer.State) { prog.Send(s) }) })
+	}
+	_, err := prog.Run()
+	cancel()
+	wg.Wait()
+	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
+		err = nil
+	}
+	return err
+}
+
+// stream runs the adapter and hands its updates to the panel.
+func stream(ctx context.Context, cfg panelConfig, prog *tea.Program) {
+	bin := cfg.AdapterBin
+	if bin == "" {
+		var err error
+		if bin, err = adapter.ResolveBin(); err != nil {
+			prog.Send(adapter.StatusUpdate{Status: adapter.Reconnecting, Err: err})
+			return
+		}
+	}
+	updates := make(chan adapter.Update)
+	go func() {
+		for u := range updates {
+			prog.Send(u)
+		}
+	}()
+	s := &adapter.Stream{Bin: bin, Session: cfg.Session}
+	s.Run(ctx, updates)
+	close(updates)
+}
+
+// execTool runs a helper (md-viewer) to completion, its output kept off
+// the panel's terminal.
+func execTool(ctx context.Context, env []string, name string, args ...string) error {
+	c := exec.CommandContext(ctx, name, args...)
+	c.Env = append(os.Environ(), env...)
+	out, err := c.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runOpen is the launcher.
+func runOpen(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("rex-amq-ui open", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	session := fs.String("session", "", "open the panel in Rex session `S` (default: $REX_SESSION)")
+	tab := fs.String("tab", "", "the tab to show: "+strings.Join(apc.Tabs, ", "))
+	board := fs.Bool("board", false, "open at Board size (centred, 88%) instead of Drawer (right, 35%)")
+	adapterBin := fs.String("adapter-bin", "", "rex-amq-adapter binary `path` the panel runs")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: rex-amq-ui open [flags]")
+		fmt.Fprintln(stderr, "Open the session's rex-amq-ui panel in a floating layer of its active window, or")
+		fmt.Fprintln(stderr, "restore the one already open, and print its layer and block as JSON.")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	l := layer.Launch{Session: cmp(*session, getenv("REX_SESSION")), Tab: *tab}
+	if *board {
+		l.Size = layer.Board
+	}
+	server := getenv("REX_SERVER")
+	if server == "" || l.Session == "" {
+		fmt.Fprintln(stderr, "rex-amq-ui open: needs $REX_SERVER and a session (--session or $REX_SESSION)")
+		return 2
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(stderr, "rex-amq-ui open:", err)
+		return 1
+	}
+	l.Command = []string{exe}
+	if *adapterBin != "" {
+		l.Command = append(l.Command, "--adapter-bin", *adapterBin)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c, err := rexctl.Dial(ctx, server)
+	if err != nil {
+		fmt.Fprintln(stderr, "rex-amq-ui open:", err)
+		return 1
+	}
+	defer c.Close()
+	o, err := layer.Open(ctx, c, l)
+	if err != nil {
+		fmt.Fprintln(stderr, "rex-amq-ui open:", err)
+		return 1
+	}
+	json.NewEncoder(stdout).Encode(o)
+	return 0
 }
