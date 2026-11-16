@@ -52,7 +52,9 @@ flowchart LR
 | `cmd/rex-amq-ui` | The three commands: the panel, `open`, and `waiting`. |
 | `lua/rex-amq-ui/init.lua` | The Rex plugin: the two actions and their keys. |
 
-The policy lives in Go and the Lua stays plumbing. The plugin never decides who waits or how a layer is created. It asks the binary (`waiting --json`, `open`) and makes only the few Rex calls that a key press needs to be instant: restoring or minimizing an existing layer, and moving it between tabs. It finds the panel by the same rule as `layer.Open`: a floating-layer block labelled `rex-amq-ui`, preferring the active tab's. If that rule changes, change both.
+The policy lives in Go and the Lua stays plumbing. The plugin never decides who waits or how a layer is created. It asks the binary (`waiting --json`, `open`) and makes only the few Rex calls that a key press needs to be instant: restoring or minimizing an existing layer, and moving it between tabs. It finds the panel by the same rule as `layer.Open`: a floating-layer block labelled `rex-amq-ui`, preferring the active tab's. If that rule changes, change both. The plugin adds one fallback that `open` lacks: a block labelled `rex-amq-ui` in a window's tiled layout. A cross-tab move that broke off between `move_block` and `float_block` leaves the panel there, and the next toggle floats it again instead of opening a second panel.
+
+The plugin undoes a transition it leaves half done. If Rex refuses to minimize a layer after the plugin paused the panel, the plugin resumes the panel, because a paused panel on a visible layer would look frozen and never see a minimized-to-normal edge. With one waiter, it focuses the pane only after it has read the view and minimized the panel; if either fails, it focuses nothing, which is the order the panel's own `Enter` uses.
 
 ## Data flow
 

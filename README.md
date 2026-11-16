@@ -96,6 +96,7 @@ What `Cmd+Shift+A` does depends on where the panel is:
 | up and focused in this tab | pauses it and minimizes its layer; focus returns to your pane |
 | minimized, or up but not focused, in this tab | brings it back to normal, focuses it, and resumes it |
 | in another tab of the session | moves it into this tab at the same size, then shows it |
+| left in a tab's layout by a move that broke off | floats it again in this tab, then shows it |
 
 `Cmd+Shift+U` asks `rex-amq-ui waiting --json` who waits on you. Nobody: it logs `rex-amq-ui: nobody waits`. One member whose pane still exists: it hides the panel if it is up and focuses that pane, switching tabs if needed. Several, or one whose pane is gone: it shows the panel on Overview, where the alerts are.
 
