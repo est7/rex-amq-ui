@@ -184,11 +184,6 @@ func (m Model) waiting(c *canvas) {
 	}
 }
 
-// section is a section heading.
-func section(c *canvas, text string, fg color.Color) {
-	c.add(Span{Text: " " + text, Fg: fg, Bold: true})
-}
-
 // ago is how long before now t was, in its largest unit.
 func ago(now, t time.Time) string {
 	if t.IsZero() {
@@ -212,15 +207,6 @@ func wrap(text string, w int) []string {
 		return nil
 	}
 	return strings.Split(ansi.Wrap(clean(text), w, " "), "\n")
-}
-
-// scroll is the first row to show so that row sel is inside a window of n
-// rows over total.
-func scroll(sel, n, total int) int {
-	if n <= 0 || total <= n {
-		return 0
-	}
-	return min(max(sel-n/2, 0), total-n)
 }
 
 var blockedOnMe = regexp.MustCompile(`(?i)blocked on me`)

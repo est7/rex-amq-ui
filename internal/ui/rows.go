@@ -286,7 +286,7 @@ func (m Model) rowCount(t Tab) int {
 	case TabEpics:
 		return len(m.epics())
 	case TabOverview:
-		return len(m.alerts())
+		return len(m.alerts()) + m.overviewSections()
 	case TabMembers:
 		return len(m.members())
 	case TabMail:

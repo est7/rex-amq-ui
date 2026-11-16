@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/est7/rex-amq-ui/internal/adapter"
 	"github.com/est7/rex-amq-ui/internal/layer"
@@ -78,5 +80,33 @@ func TestLateActionDoesNotRepause(t *testing.T) {
 	next, cmd := m.Update(key("q"))
 	if m = step(t, next.(Model), cmd()); !m.Paused() {
 		t.Fatal("a current minimize did not pause")
+	}
+}
+
+func TestOverviewScrollsToTheSelection(t *testing.T) {
+	m := build(t, "edited-crew-attention", 70, 10, Deps{}, Options{})
+	p := *m.st.Panel
+	p.Attention = map[string][]adapter.Mark{}
+	for i := range 20 {
+		p.Attention[fmt.Sprintf("agent-%02d", i)] = []adapter.Mark{{Kind: adapter.MarkStalled, At: m.now().Add(time.Duration(i-30) * time.Minute)}}
+	}
+	m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: next(m), Panel: p}})
+	m = press(t, m, "g")
+	for range 19 {
+		m = press(t, m, "j")
+	}
+	if !contains(m.Frame(), "agent-19 stalled") {
+		t.Fatalf("the selected alert is off screen:\n%s", plain(m.Frame()))
+	}
+	m = press(t, m, "G")
+	if !contains(m.Frame(), "Hand-back #1") {
+		t.Fatalf("G does not reach the hand-back below the alerts:\n%s", plain(m.Frame()))
+	}
+	m = press(t, m, "g")
+	if !contains(m.Frame(), "SYSTEM ALERTS") || !contains(m.Frame(), "agent-00 stalled") {
+		t.Fatalf("g does not return to the top:\n%s", plain(m.Frame()))
+	}
+	if bad := holes(m.Frame(), 70, 10); bad != nil {
+		t.Fatal(bad)
 	}
 }
