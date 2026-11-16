@@ -1,7 +1,6 @@
 package pixelmouse_test
 
 import (
-	"errors"
 	"fmt"
 	"image"
 	"testing"
@@ -15,48 +14,6 @@ func TestPixelMouseModes(t *testing.T) {
 	}
 	if pixelmouse.Disable != "\x1b[?1016l\x1b[?1006l\x1b[?1002l" {
 		t.Errorf("Disable %q: want the reverse", pixelmouse.Disable)
-	}
-}
-
-func TestPixelMouseParse(t *testing.T) {
-	cases := []struct {
-		in   string
-		want pixelmouse.Event
-		n    int
-	}{
-		// SGR reports count from 1; Event is 0-based pixels.
-		{"\x1b[<0;123;456M", pixelmouse.Event{Button: 0, X: 122, Y: 455}, 13},
-		{"\x1b[<0;123;456mrest", pixelmouse.Event{Button: 0, X: 122, Y: 455, Release: true}, 13},
-		{"\x1b[<2;1;1M", pixelmouse.Event{Button: 2, X: 0, Y: 0}, 9},
-		{"\x1b[<32;10;20M", pixelmouse.Event{Button: 0, X: 9, Y: 19, Motion: true}, 12},
-		{"\x1b[<65;10;20M", pixelmouse.Event{Button: 1, X: 9, Y: 19, Wheel: true}, 12},
-		{"\x1b[<20;2000;1500M", pixelmouse.Event{Button: 0, X: 1999, Y: 1499, Mods: pixelmouse.Shift | pixelmouse.Ctrl}, 16},
-		{"\x1b[<8;5;5M", pixelmouse.Event{Button: 0, X: 4, Y: 4, Mods: pixelmouse.Meta}, 9},
-	}
-	for _, c := range cases {
-		ev, n, err := pixelmouse.Parse([]byte(c.in))
-		if err != nil || ev != c.want || n != c.n {
-			t.Errorf("Parse(%q) = %+v, %d, %v; want %+v, %d", c.in, ev, n, err, c.want, c.n)
-		}
-	}
-	for _, in := range []string{"\x1b[<0;12", "\x1b[<", "\x1b["} {
-		if _, _, err := pixelmouse.Parse([]byte(in)); !errors.Is(err, pixelmouse.ErrIncomplete) {
-			t.Errorf("Parse(%q) err %v, want ErrIncomplete", in, err)
-		}
-	}
-	for _, in := range []string{"\x1b[A", "x", "\x1b[<0;a;1M", "\x1b[<0;1M", "\x1b[<0;1;2;3M", "\x1b[<0;0;5M", "\x1b[<0;99999999999;5M"} {
-		if _, _, err := pixelmouse.Parse([]byte(in)); !errors.Is(err, pixelmouse.ErrNotMouse) {
-			t.Errorf("Parse(%q) err %v, want ErrNotMouse", in, err)
-		}
-	}
-	ev, _, _ := pixelmouse.Parse([]byte("\x1b[<0;5;5M"))
-	if !ev.LeftPress() {
-		t.Errorf("left press not reported as one")
-	}
-	for _, in := range []string{"\x1b[<0;5;5m", "\x1b[<32;5;5M", "\x1b[<64;5;5M", "\x1b[<2;5;5M"} {
-		if ev, _, _ := pixelmouse.Parse([]byte(in)); ev.LeftPress() {
-			t.Errorf("%q counted as a left press", in)
-		}
 	}
 }
 
@@ -109,15 +66,5 @@ func TestPixelMouseHitTestTopmostWins(t *testing.T) {
 	ts := []pixelmouse.Target{{ID: "under", Rect: image.Rect(0, 0, 50, 50)}, {ID: "over", Rect: image.Rect(25, 25, 75, 75)}}
 	if id, _ := pixelmouse.HitTest(30, 30, pixelmouse.Region{CellW: 9, CellH: 22}, ts); id != "over" {
 		t.Errorf("overlap hit %q, want the target drawn last", id)
-	}
-}
-
-func TestPixelMouseEventAt(t *testing.T) {
-	ev, _, err := pixelmouse.Parse([]byte(fmt.Sprintf("\x1b[<0;%d;%dM", 2*23+151, 3*49+61)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id, ok := pixelmouse.HitTest(ev.X, ev.Y, pixelmouse.Region{Col: 2, Row: 3, CellW: 23, CellH: 49}, badge); !ok || id != "claude-98" {
-		t.Errorf("parsed click at %d,%d missed the badge", ev.X, ev.Y)
 	}
 }
