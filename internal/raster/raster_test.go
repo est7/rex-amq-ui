@@ -19,6 +19,8 @@ var (
 // The cell sizes observed on live Rex: a standard display and a Retina one.
 var cellSizes = []raster.Metrics{{CellW: 9, CellH: 22}, {CellW: 23, CellH: 49}}
 
+var _ = rastertest.UpdateFlag()
+
 func newCanvas(w, h int) *raster.Canvas {
 	c := raster.NewCanvas(w, h, raster.Metrics{CellW: 9, CellH: 22})
 	c.Clear(bg)

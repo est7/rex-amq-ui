@@ -415,3 +415,29 @@ func TestSceneSelect(t *testing.T) {
 		t.Errorf("selection not reflected")
 	}
 }
+
+func TestReplayNoBurstAfterEmptyState(t *testing.T) {
+	m, _ := newModel()
+	m.Update(adapter.State{})
+	m.Update(state([]adapter.Agent{agent("o", "orchestrator", "idle"), agent("i", "implementer", "idle")},
+		[]adapter.Message{msg("m1", 1, "o", to("i"), adapter.MsgDrained), msg("m2", 2, "i", to("o"), adapter.MsgDrained)}))
+	if m.NeedsAnimation() {
+		t.Errorf("the first snapshot after an empty state pulses its history")
+	}
+}
+
+func TestSceneObligationFollowsOpener(t *testing.T) {
+	// The opener's own edge carries the obligation, whatever owed_by and
+	// owed_to say.
+	agents := []adapter.Agent{agent("o", "orchestrator", "idle"), agent("i", "implementer", "idle")}
+	ob := adapter.Obligation{Ref: "m1", OwedBy: "o", OwedTo: "i", State: "open"}
+	m, _ := newModel()
+	m.Update(state(agents, []adapter.Message{msg("m1", 1, "o", to("i"), adapter.MsgDrained)}, ob))
+	s := m.Scene(board)
+	if e := mustEdge(t, s, "o", "i"); e.Style != graph.StyleObligation {
+		t.Errorf("opener edge o->i style %d, want obligation", e.Style)
+	}
+	if _, ok := edge(s, "i", "o"); ok {
+		t.Errorf("an i->o edge appears though no mail went that way")
+	}
+}

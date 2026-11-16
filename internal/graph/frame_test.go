@@ -16,6 +16,8 @@ import (
 // crew is a six-member crew with a departed implementer and the human
 // writing in from outside: every edge style, a retired node, the "+N"
 // node, working halos, and an open obligation.
+var _ = rastertest.UpdateFlag()
+
 func crew() (agents []adapter.Agent, msgs []adapter.Message, obs []adapter.Obligation) {
 	agents = []adapter.Agent{
 		agent("claude-98", "orchestrator", "working"),
@@ -150,10 +152,20 @@ func TestSceneGeometry(t *testing.T) {
 				if rects[e.From].Contains(e.Curve.At(e.T0)) || rects[e.To].Contains(e.Curve.At(e.T1)) {
 					t.Errorf("%s->%s starts or ends inside a badge", e.From, e.To)
 				}
+				for k := 0; k <= 64; k++ {
+					p := e.Curve.At(e.T0 + (e.T1-e.T0)*float64(k)/64)
+					for _, n := range s.Nodes {
+						if n.ID != e.From && n.ID != e.To && n.Rect.Contains(p) {
+							t.Errorf("%s->%s runs behind %s's badge at %v", e.From, e.To, n.ID, p)
+							k = 64
+							break
+						}
+					}
+				}
 				if back, ok := edge(s, e.To, e.From); ok {
 					a, b := e.Curve.At(0.5), back.Curve.At(0.5)
-					if d := a.Sub(b).Len(); d < 4*e.Width {
-						t.Errorf("%s<->%s bow only %.1fpx apart: the reply covers the request", e.From, e.To, d)
+					if d, gap := a.Sub(b).Len(), (e.Width+back.Width)/2+float64(fs.size.Cell.CellW)/2; d < gap {
+						t.Errorf("%s<->%s strokes %.1fpx apart, want %.1f: the reply covers the request", e.From, e.To, d, gap)
 					}
 				}
 			}

@@ -106,8 +106,8 @@ const (
 )
 
 // Scene places the model at sz: nodes around an ellipse filling the graph
-// area (the lead at the top, then clockwise), edges as curves that bow to
-// the right of travel so a reply never covers its request, each clipped to
+// area (the lead at the top, then clockwise), edges as curves that bow
+// toward the center in a lane of their own per direction, each clipped to
 // the gap between the two badges. All geometry scales from the cell size.
 func (m *Model) Scene(sz Size) Scene {
 	s := Scene{Size: sz, Status: m.Status()}
@@ -136,7 +136,13 @@ func (m *Model) Scene(sz Size) Scene {
 	for _, k := range keys {
 		a := aggs[k]
 		e := Edge{From: k.from, To: k.to, Count: a.count, Style: a.style, Width: edgeWidth(base, a.count, a.style)}
-		e.Curve, e.T0, e.T1 = route(rect[k.from], rect[k.to], cw*0.5)
+		var others []raster.Rect
+		for _, n := range s.Nodes {
+			if n.ID != k.from && n.ID != k.to {
+				others = append(others, n.Rect.Inset(-cw*0.3))
+			}
+		}
+		e.Curve, e.T0, e.T1 = route(rect[k.from], rect[k.to], others, s.Graph.Center(), cw*0.6+e.Width/2, cw*0.5)
 		at[k] = len(s.Edges)
 		s.Edges = append(s.Edges, e)
 	}
@@ -209,32 +215,75 @@ func place(nodes []Node, area raster.Rect, cw, ch float64) {
 	}
 }
 
-// route is the curve from a's center to b's, bowed right of travel by a
-// sixth of its length, and the span of it outside both badges (grown by
-// gap so the arrow stops short of b).
-func route(a, b raster.Rect, gap float64) (raster.Quad, float64, float64) {
-	p0, p2 := a.Center(), b.Center()
-	chord := p2.Sub(p0)
-	ctrl := p0.Lerp(p2, 0.5).Add(chord.Perp().Unit().Mul(chord.Len() / 6))
-	q := raster.Quad{P0: p0, P1: ctrl, P2: p2}
-	ga, gb := a.Inset(-gap*0.5), b.Inset(-gap)
-	t0 := boundary(q, ga, 0, 0.5, true)
-	t1 := boundary(q, gb, 0.5, 1, false)
-	return q, t0, t1
-}
-
-// boundary finds where the curve crosses r's edge between lo and hi by
-// bisection: leaving r when leaving is true, entering it otherwise.
-func boundary(q raster.Quad, r raster.Rect, lo, hi float64, leaving bool) float64 {
-	for range 24 {
-		mid := (lo + hi) / 2
-		if r.Contains(q.At(mid)) == leaving {
-			lo = mid
-		} else {
-			hi = mid
+// route is the curve from a to b and the span of it outside both badges
+// (b's grown by gap so the arrow stops short of it). The curve runs in its
+// own lane, shifted lane pixels right of travel, so a reply never covers
+// its request. It bows toward the graph's center, away from the ring of
+// badges, and bows harder until its visible span clears every badge in
+// others and does not re-enter a or b; when no bow does, it keeps the
+// gentlest.
+func route(a, b raster.Rect, others []raster.Rect, center raster.Point, lane, gap float64) (raster.Quad, float64, float64) {
+	chord := b.Center().Sub(a.Center())
+	shift := chord.Perp().Unit().Mul(lane)
+	p0, p2 := a.Center().Add(shift), b.Center().Add(shift)
+	mid := p0.Lerp(p2, 0.5)
+	in := center.Sub(mid)
+	var first raster.Quad
+	var f0, f1 float64
+	for i, k := range []float64{1.0 / 6, 1.0 / 4, 1.0 / 3, 1.0 / 2.4, 1.0 / 1.8} {
+		bow := min(chord.Len()*k, in.Len()*(0.8+0.15*float64(i)))
+		q := raster.Quad{P0: p0, P1: mid.Add(in.Unit().Mul(bow)), P2: p2}
+		t0 := exit(q, a.Inset(-gap*0.5), 0, 1)
+		t1 := exit(q, b.Inset(-gap), 1, 0)
+		if i == 0 {
+			first, f0, f1 = q, t0, t1
+		}
+		if t0 < t1 && clear(q, t0, t1, append(others, a, b)) {
+			return q, t0, t1
 		}
 	}
-	return (lo + hi) / 2
+	return first, f0, f1
+}
+
+// clear reports whether the curve between t0 and t1 stays out of rs.
+func clear(q raster.Quad, t0, t1 float64, rs []raster.Rect) bool {
+	for i := 0; i <= 48; i++ {
+		p := q.At(t0 + (t1-t0)*float64(i)/48)
+		for _, r := range rs {
+			if r.Contains(p) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// exit is where the curve, walked from t=from toward t=to, first leaves
+// r: found by stepping, then refined by bisection. It is from when the
+// curve starts outside r, and to when it never leaves.
+func exit(q raster.Quad, r raster.Rect, from, to float64) float64 {
+	const steps = 64
+	prev := from
+	for i := 0; i <= steps; i++ {
+		t := from + (to-from)*float64(i)/steps
+		if !r.Contains(q.At(t)) {
+			if i == 0 {
+				return t
+			}
+			lo, hi := prev, t
+			for range 20 {
+				mid := (lo + hi) / 2
+				if r.Contains(q.At(mid)) {
+					lo = mid
+				} else {
+					hi = mid
+				}
+			}
+			return hi
+		}
+		prev = t
+	}
+	return to
 }
 
 // edgeWidth grows with the log of the message count, capped, and an open

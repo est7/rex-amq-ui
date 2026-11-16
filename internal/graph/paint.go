@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/est7/rex-amq-ui/internal/raster"
 )
@@ -56,8 +57,9 @@ func Paint(c *raster.Canvas, s Scene, p Palette) {
 		c.Halo(raster.RectXYWH(at.X-r, at.Y-r, 2*r, 2*r), r, r*1.6, alpha(col, 0.45))
 		c.Disc(at, r, p.Fg)
 	}
+	k := textScale(s.Nodes, cw)
 	for _, n := range s.Nodes {
-		paintNode(c, n, p, cw, ch)
+		paintNode(c, n, p, cw, ch, k)
 	}
 	// Counts go over the badges: a count hidden under a badge it passes
 	// would read as a missing edge.
@@ -104,7 +106,8 @@ func paintEdge(c *raster.Canvas, e Edge, p Palette, cw, ch float64) {
 }
 
 // paintCount labels an edge with its message count (or "!" for an open
-// obligation whose opener is not in the mail) on a pill at its middle.
+// obligation whose opener is not in the mail) on a pill a third of the way
+// from its sender, so a request's count and its reply's do not stack.
 func paintCount(c *raster.Canvas, e Edge, p Palette, cw, ch float64) {
 	if e.T1 <= e.T0 {
 		return
@@ -114,7 +117,7 @@ func paintCount(c *raster.Canvas, e Edge, p Palette, cw, ch float64) {
 		label = "!"
 	}
 	f := c.CellFace(0.85, true)
-	at := e.Curve.At(e.T0 + (e.T1-e.T0)*0.5)
+	at := e.Curve.At(e.T0 + (e.T1-e.T0)*0.33)
 	w, h := f.Measure(label)+cw*1.1, ch*0.78
 	r := raster.RectXYWH(at.X-w/2, at.Y-h/2, w, h)
 	col := edgeColor(e.Style, p)
@@ -136,7 +139,28 @@ func activityColor(a string, p Palette) color.NRGBA {
 	}
 }
 
-func paintNode(c *raster.Canvas, n Node, p Palette, cw, ch float64) {
+// textScale is the badge text size, as a fraction of the terminal's, at
+// which the longest label fits its badge: 1 when there is room, never
+// below 0.7 (past that, labels are cut with an ellipsis instead). The 3%
+// margin absorbs the font size rounding to whole pixels. One
+// scale for every badge keeps them alike.
+func textScale(nodes []Node, cw float64) float64 {
+	k := 1.0
+	for _, n := range nodes {
+		if n.Kind == KindMore {
+			continue
+		}
+		if runes := utf8.RuneCountInString(n.Label); runes > 0 {
+			k = min(k, 0.97*badgeInner(n.Rect, cw)/(float64(runes)*cw))
+		}
+	}
+	return max(k, 0.7)
+}
+
+// badgeInner is the width a badge leaves for its text, past the status dot.
+func badgeInner(r raster.Rect, cw float64) float64 { return r.W() - cw*3 }
+
+func paintNode(c *raster.Canvas, n Node, p Palette, cw, ch, k float64) {
 	r := n.Rect
 	radius := ch * 0.45
 	border, fill, text, sub := p.Border, p.Surface, p.Fg, p.Muted
@@ -166,14 +190,14 @@ func paintNode(c *raster.Canvas, n Node, p Palette, cw, ch float64) {
 	}
 	c.StrokeRoundRect(r, radius, bw, border)
 
-	label, role := c.CellFace(1, true), c.CellFace(0.85, false)
+	label, role := c.CellFace(k, true), c.CellFace(0.85*k, false)
 	if n.Kind == KindMore {
 		c.TextCentered(raster.Point{X: r.Center().X, Y: r.Min.Y + r.H()*0.4}, n.Label, label, text)
 		c.TextCentered(raster.Point{X: r.Center().X, Y: r.Min.Y + r.H()*0.72}, n.Role, role, sub)
 		return
 	}
 	x := r.Min.X + cw*2.2
-	inner := r.Max.X - x - cw*0.8
+	inner := badgeInner(r, cw)
 	c.Disc(raster.Point{X: r.Min.X + cw*1.15, Y: r.Min.Y + r.H()*0.4}, cw*0.42, dot)
 	c.Text(raster.Point{X: x, Y: r.Min.Y + r.H()*0.4 + label.Ascent*0.38}, label.Fit(n.Label, inner), label, text)
 	c.Text(raster.Point{X: x, Y: r.Min.Y + r.H()*0.74 + role.Ascent*0.38}, role.Fit(n.Role, inner), role, sub)
@@ -223,15 +247,15 @@ func paintBar(c *raster.Canvas, s Scene, p Palette, cw, ch float64) {
 // paintLegend shows each stroke style as drawn, then the current message.
 func paintLegend(c *raster.Canvas, s Scene, p Palette, cw, ch float64) {
 	w, h := s.Size.Pixels()
-	f := c.CellFace(1, false)
 	y := float64(h) - ch*1.9
 	base := max(1.2, cw*0.2)
-	// The full legend, or in a narrow drawer a shorter one.
+	// The full legend, or in a narrow drawer a shorter, then smaller one.
 	for _, v := range []legend{
-		{sample: 4, gap: 2.5, names: [4]string{"drained", "open obligation", "queued", "bounced / dead letter"}},
-		{sample: 2.5, gap: 1.5, names: [4]string{"drained", "obligation", "queued", "bounced"}},
+		{text: 1, sample: 4, gap: 2.5, names: [4]string{"drained", "open obligation", "queued", "bounced / dead letter"}},
+		{text: 1, sample: 2.5, gap: 1.5, names: [4]string{"drained", "obligation", "queued", "bounced"}},
+		{text: 0.7, sample: 1.7, gap: 0.8, names: [4]string{"drained", "obligation", "queued", "bounced"}},
 	} {
-		if v.width(f, cw) <= float64(w)-2*cw {
+		if f := c.CellFace(v.text, false); v.width(f, cw) <= float64(w)-2*cw {
 			v.paint(c, f, p, cw, y, base)
 			break
 		}
@@ -241,6 +265,7 @@ func paintLegend(c *raster.Canvas, s Scene, p Palette, cw, ch float64) {
 	if cur == nil {
 		return
 	}
+	f := c.CellFace(1, false)
 	y = float64(h) - ch*0.7
 	line := fmt.Sprintf("%s  %s → %s  %s  ", cur.At.Format(time.TimeOnly), cur.From, strings.Join(cur.To, ", "), cur.State)
 	c.Text(raster.Point{X: cw, Y: y + f.Ascent*0.38}, f.Fit(line, float64(w)-2*cw), f, p.Fg)
@@ -263,11 +288,12 @@ func span(d time.Duration) string {
 
 var legendStyles = [4]EdgeStyle{StyleDrained, StyleObligation, StyleQueued, StyleAlert}
 
-// legend is one form of the legend line: stroke samples sample cells long,
-// gap cells between entries.
+// legend is one form of the legend line: text at that fraction of the
+// terminal's size, stroke samples sample cells long, gap cells between
+// entries.
 type legend struct {
-	sample, gap float64
-	names       [4]string
+	text, sample, gap float64
+	names             [4]string
 }
 
 func (l legend) width(f *raster.Face, cw float64) float64 {
@@ -289,7 +315,8 @@ func (l legend) paint(c *raster.Canvas, f *raster.Face, p Palette, cw, y, base f
 		}
 		dash := edgeDash(style, cw)
 		if dash != (raster.Dash{}) {
-			dash = raster.Dash{On: cw * 0.8, Off: cw * 0.55}
+			on := cw * min(0.8, l.sample/3.2)
+			dash = raster.Dash{On: on, Off: on * 0.7}
 		}
 		c.Stroke(seg, w, col, dash)
 		x += cw * (l.sample + 1)

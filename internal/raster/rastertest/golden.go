@@ -12,9 +12,24 @@ import (
 	"testing"
 )
 
-// Update rewrites the reference PNGs instead of comparing against them:
-// go test ./... -run <Test> -update
-var Update = flag.Bool("update", false, "rewrite reference PNGs under testdata")
+// updating reports whether the test binary runs with -update, which
+// rewrites the reference PNGs instead of comparing against them. Each test
+// package declares the flag itself (UpdateFlag) rather than this package
+// registering it, so a binary whose own goldens also use -update does not
+// panic on a second registration.
+func updating() bool {
+	f := flag.Lookup("update")
+	return f != nil && f.Value.String() == "true"
+}
+
+// UpdateFlag declares -update for a test package that has no such flag
+// yet: var _ = rastertest.UpdateFlag()
+func UpdateFlag() bool {
+	if flag.Lookup("update") == nil {
+		flag.Bool("update", false, "rewrite reference PNGs under testdata")
+	}
+	return true
+}
 
 // Tolerance is the largest per-channel difference a pixel may show against
 // its reference: float rounding (fused multiply-add on some CPUs) moves an
@@ -22,10 +37,10 @@ var Update = flag.Bool("update", false, "rewrite reference PNGs under testdata")
 const Tolerance = 2
 
 // Golden compares got with the PNG at path, or writes it there with
-// -update.
+// -update (see UpdateFlag).
 func Golden(t *testing.T, path string, got *image.RGBA) {
 	t.Helper()
-	if *Update {
+	if updating() {
 		var buf bytes.Buffer
 		if err := png.Encode(&buf, got); err != nil {
 			t.Fatal(err)

@@ -68,8 +68,9 @@ func New(clock func() time.Time) *Model {
 }
 
 // Update takes the latest state. In Live, mail not seen before pulses
-// along its edges (except in the first state, whose mail is history); in
-// replay, the cursor stays where it is.
+// along its edges, except in the first snapshot, whose mail is history; a
+// state before any snapshot (adapter.State.Ready false) does not count as
+// one. In replay, the cursor stays where it is.
 func (m *Model) Update(st adapter.State) {
 	now := m.clock()
 	msgs := slices.Clone(st.Messages)
@@ -87,7 +88,7 @@ func (m *Model) Update(st adapter.State) {
 	for i, x := range msgs {
 		m.index[x.ID] = i
 	}
-	m.st, m.msgs, m.ready = st, msgs, true
+	m.st, m.msgs, m.ready = st, msgs, st.Ready()
 	m.shown = min(m.shown, len(msgs))
 	m.prune(now)
 }
@@ -337,9 +338,11 @@ type edgeAgg struct {
 
 // edges aggregates the shown mail per drawn from->to pair. An edge takes
 // the most actionable style among its messages (obligation > alert >
-// queued > drained). An open obligation marks the edge its opener
-// travelled (owed_to -> owed_by) once replay has shown the opener; an
-// obligation whose opener is not in the mail shows only in Live.
+// queued > drained). An open obligation marks the edges its opener
+// travelled once replay has shown the opener. When the opener is not in
+// the mail (the adapter keeps a window of it), the obligation shows in
+// Live only, on owed_to -> owed_by: the direction a request travels, as
+// AMQ owes the reply to the opener's sender.
 func (m *Model) edges(c cast) (map[edgeKey]*edgeAgg, []edgeKey) {
 	n := m.n()
 	aggs := map[edgeKey]*edgeAgg{}
@@ -360,13 +363,17 @@ func (m *Model) edges(c cast) (map[edgeKey]*edgeAgg, []edgeKey) {
 		}
 	}
 	for _, ob := range m.obligations() {
-		i, found := m.index[ob.Ref]
-		if (found && i >= n) || (!found && !m.live) {
+		if i, found := m.index[ob.Ref]; found {
+			if i < n {
+				for _, k := range m.pulseEdges(c, m.msgs[i]) {
+					add(k, 0, StyleObligation)
+				}
+			}
 			continue
 		}
 		a, ok1 := c.node(ob.OwedTo)
 		b, ok2 := c.node(ob.OwedBy)
-		if ok1 && ok2 && a != b {
+		if m.live && ok1 && ok2 && a != b {
 			add(edgeKey{a, b}, 0, StyleObligation)
 		}
 	}
