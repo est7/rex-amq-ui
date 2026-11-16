@@ -47,6 +47,17 @@ func dial(t *testing.T, s *rexctltest.Server) *rexctl.Client {
 	return c
 }
 
+// attached dials s and attaches to session, as Rex requires before any of
+// the session's methods.
+func attached(t *testing.T, s *rexctltest.Server) *rexctl.Client {
+	t.Helper()
+	c := dial(t, s)
+	if _, err := c.Attach(ctx(t), session); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	return c
+}
+
 func ctx(t *testing.T) context.Context {
 	c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -177,7 +188,7 @@ func TestRexctlAttachReadsTheViewAndOrdersEvents(t *testing.T) {
 // fake against Rex's own input schema and here against the exact request.
 func TestRexctlLayerOperations(t *testing.T) {
 	s := rexctltest.NewServer(t)
-	c := dial(t, s)
+	c := attached(t, s)
 	cx := ctx(t)
 	made, err := c.NewLayer(cx, rexctl.NewLayer{
 		SessionID: session, WindowID: "window:1", Bounds: rexctl.Bounds{0.64, 0.02, 0.35, 0.96},
@@ -236,7 +247,7 @@ func TestRexctlLayerOperations(t *testing.T) {
 
 func TestRexctlBlockSizeAndWrite(t *testing.T) {
 	s := rexctltest.NewServer(t)
-	c := dial(t, s)
+	c := attached(t, s)
 	size, err := c.TerminalSize(ctx(t), session, panel)
 	if err != nil || size != (rexctl.TerminalSize{Columns: 120, Rows: 40, CellWidthPx: 9, CellHeightPx: 22}) {
 		t.Fatalf("size %+v %v", size, err)
@@ -284,7 +295,7 @@ func TestRexctlSelectSessionThroughTheApp(t *testing.T) {
 // event channel; later calls fail at once.
 func TestRexctlConnectionLoss(t *testing.T) {
 	s := rexctltest.NewServer(t)
-	c := dial(t, s)
+	c := attached(t, s)
 	s.Handle("session.view", func(rexctltest.Request) (any, *rexctltest.Error) {
 		s.CloseConnections()
 		return nil, nil
@@ -313,7 +324,7 @@ func TestRexctlErrorsAndLimits(t *testing.T) {
 	s.Handle("session.focus_block", func(rexctltest.Request) (any, *rexctltest.Error) {
 		return nil, &rexctltest.Error{Code: "not_found", Message: "block not found", Status: 404}
 	})
-	c := dial(t, s)
+	c := attached(t, s)
 	if _, err := c.FocusBlock(ctx(t), session, "block:gone"); !rexctl.IsCode(err, rexctl.CodeNotFound) {
 		t.Fatalf("focus of a gone block: %v", err)
 	}
@@ -377,5 +388,141 @@ func TestRexctlSocketPath(t *testing.T) {
 	}
 	if _, err := rexctl.Dial(ctx(t), "unix:///tmp/rexctl-no-such-dir/s.sock"); err == nil {
 		t.Fatal("dialed a socket that does not exist")
+	}
+}
+
+// A server that stops reading blocks the request being written. A call
+// behind it returns when its own context ends, is never sent, and the
+// connection serves the next call once the server reads again.
+func TestRexctlCallsDoNotWaitForABlockedWriter(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	c := attached(t, s)
+	resume := s.PauseReading()
+	defer resume()
+	// The fake's reader may already be waiting in a read: this request gets
+	// through, and the reads stop after it.
+	if _, err := c.FocusBlock(ctx(t), session, right); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", 900<<10)
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := c.Write(context.Background(), session, panel, big)
+		wrote <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !rexctl.Writing(c); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the large write never started")
+		}
+	}
+
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.FocusBlock(short, session, "block:cancelled")
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("a call behind a blocked write returned %v after %v", err, time.Since(start))
+	}
+
+	resume()
+	if err := <-wrote; err != nil {
+		t.Fatalf("the blocked write: %v", err)
+	}
+	if _, err := c.View(ctx(t), session); err != nil {
+		t.Fatalf("the connection after the blocked write: %v", err)
+	}
+	for _, r := range s.Requests() {
+		if r.Method == "session.focus_block" && strings.Contains(string(r.Payload), "block:cancelled") {
+			t.Fatal("the cancelled call was sent")
+		}
+	}
+}
+
+// emitAndRoundTrip sends one session event, then makes a call. The event
+// is written to the socket before the call's answer, so when the call
+// returns the client has read the event. The call is a block.method, which
+// does not wait behind a request the server is still running.
+func emitAndRoundTrip(t *testing.T, s *rexctltest.Server, c *rexctl.Client, payload map[string]any) error {
+	t.Helper()
+	s.Emit(session, "session_view_changed", payload)
+	_, err := c.TerminalSize(ctx(t), session, panel)
+	return err
+}
+
+// Events nobody reads queue up to the bound while responses keep coming;
+// one more ends the connection with ErrEventOverflow, failing the calls in
+// flight and closing the event channel.
+func TestRexctlEventQueueIsBounded(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	cx := ctx(t)
+	c, err := rexctl.DialWith(cx, s.URL, rexctl.Options{MaxQueuedEvents: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := c.Attach(cx, session); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	s.Handle("session.resize_layer", func(rexctltest.Request) (any, *rexctltest.Error) {
+		<-release
+		return map[string]any{"revision": 2}, nil
+	})
+	inFlight := make(chan error, 1)
+	go func() {
+		_, err := c.ResizeLayer(context.Background(), session, layer, rexctl.Bounds{0, 0, 1, 1})
+		inFlight <- err
+	}()
+	for i := range 8 {
+		if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": i + 2}); err != nil {
+			t.Fatalf("call after %d unread events: %v", i+1, err)
+		}
+	}
+	if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": 99}); !errors.Is(err, rexctl.ErrClosed) {
+		t.Fatalf("call after the bound: %v", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection did not end")
+	}
+	if err := c.Err(); !errors.Is(err, rexctl.ErrEventOverflow) || !errors.Is(err, rexctl.ErrClosed) {
+		t.Fatalf("Err %v", err)
+	}
+	if err := <-inFlight; !errors.Is(err, rexctl.ErrEventOverflow) {
+		t.Fatalf("call in flight: %v", err)
+	}
+	for timeout := time.After(5 * time.Second); ; {
+		select {
+		case _, ok := <-c.Events():
+			if !ok {
+				return
+			}
+		case <-timeout:
+			t.Fatal("events not closed")
+		}
+	}
+}
+
+func TestRexctlEventQueueByteBound(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	cx := ctx(t)
+	c, err := rexctl.DialWith(cx, s.URL, rexctl.Options{MaxQueuedBytes: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := c.Attach(cx, session); err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("p", 100)
+	for i := range 2 {
+		if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": i, "pad": pad}); err != nil {
+			t.Fatalf("event %d of about 120 bytes under a 300-byte bound: %v", i+1, err)
+		}
+	}
+	if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": 3, "pad": pad}); !errors.Is(err, rexctl.ErrClosed) || !errors.Is(c.Err(), rexctl.ErrEventOverflow) {
+		t.Fatalf("third event: %v (%v)", err, c.Err())
 	}
 }
