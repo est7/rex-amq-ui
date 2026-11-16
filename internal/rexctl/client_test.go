@@ -390,3 +390,50 @@ func TestRexctlSocketPath(t *testing.T) {
 		t.Fatal("dialed a socket that does not exist")
 	}
 }
+
+// A server that stops reading blocks the request being written. A call
+// behind it returns when its own context ends, is never sent, and the
+// connection serves the next call once the server reads again.
+func TestRexctlCallsDoNotWaitForABlockedWriter(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	c := attached(t, s)
+	resume := s.PauseReading()
+	defer resume()
+	// The fake's reader may already be waiting in a read: this request gets
+	// through, and the reads stop after it.
+	if _, err := c.FocusBlock(ctx(t), session, right); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", 900<<10)
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := c.Write(context.Background(), session, panel, big)
+		wrote <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !rexctl.Writing(c); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the large write never started")
+		}
+	}
+
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.FocusBlock(short, session, "block:cancelled")
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("a call behind a blocked write returned %v after %v", err, time.Since(start))
+	}
+
+	resume()
+	if err := <-wrote; err != nil {
+		t.Fatalf("the blocked write: %v", err)
+	}
+	if _, err := c.View(ctx(t), session); err != nil {
+		t.Fatalf("the connection after the blocked write: %v", err)
+	}
+	for _, r := range s.Requests() {
+		if r.Method == "session.focus_block" && strings.Contains(string(r.Payload), "block:cancelled") {
+			t.Fatal("the cancelled call was sent")
+		}
+	}
+}

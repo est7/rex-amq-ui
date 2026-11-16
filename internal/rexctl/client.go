@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -92,6 +93,8 @@ type Client struct {
 	stop    context.CancelFunc // ends the read loop
 	done    chan struct{}
 	events  chan Event
+	writes  chan writeJob // to the writer loop, which alone writes requests
+	writing atomic.Bool   // a request is being written to the socket
 
 	mu      sync.Mutex
 	nextID  uint64
@@ -99,6 +102,14 @@ type Client struct {
 	queue   []Event // events read and not yet taken from the channel
 	wake    chan struct{}
 	err     error // why the connection ended; nil while open
+}
+
+// writeJob is a request handed to the writer loop. done receives the
+// write's outcome, or the job's context error when it was skipped.
+type writeJob struct {
+	ctx  context.Context
+	msg  []byte
+	done chan error
 }
 
 type response struct {
@@ -137,10 +148,11 @@ func Dial(ctx context.Context, serverURL string) (*Client, error) {
 	}
 	ws.SetReadLimit(int64(w.MaxMessageBytes))
 	rctx, stop := context.WithCancel(context.Background())
-	c := &Client{ws: ws, welcome: w, stop: stop, done: make(chan struct{}), events: make(chan Event),
+	c := &Client{ws: ws, welcome: w, stop: stop, done: make(chan struct{}), events: make(chan Event), writes: make(chan writeJob),
 		nextID: 1, pending: map[string]chan response{}, wake: make(chan struct{}, 1)}
 	go c.read(rctx)
 	go c.pump()
+	go c.writer()
 	return c, nil
 }
 
@@ -397,18 +409,9 @@ func (c *Client) call(ctx context.Context, method string, payload, result any) (
 		delete(c.pending, id)
 		c.mu.Unlock()
 	}
-	if err := ctx.Err(); err != nil {
+	if err := c.send(ctx, method, b); err != nil {
 		forget()
 		return 0, err
-	}
-	// Not the caller's context: websocket closes the whole connection when
-	// a write's context ends, and one cancelled call must not end the rest.
-	wctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
-	err = c.ws.Write(wctx, websocket.MessageText, b)
-	cancel()
-	if err != nil {
-		forget()
-		return 0, fmt.Errorf("%w: send %s: %v", ErrClosed, method, err)
 	}
 	select {
 	case r := <-ch:
@@ -428,6 +431,60 @@ func (c *Client) call(ctx context.Context, method string, payload, result any) (
 	case <-ctx.Done():
 		forget()
 		return 0, ctx.Err()
+	}
+}
+
+// send hands a request to the writer loop and waits until it is written,
+// or until ctx ends or the connection does. A request whose ctx ends before
+// the writer takes it up is never sent; one already being written finishes
+// under writeTimeout while the caller returns.
+func (c *Client) send(ctx context.Context, method string, msg []byte) error {
+	job := writeJob{ctx: ctx, msg: msg, done: make(chan error, 1)}
+	select {
+	case c.writes <- job:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return c.Err()
+	}
+	select {
+	case err := <-job.done:
+		switch {
+		case err == nil:
+			return nil
+		case ctx.Err() != nil:
+			return ctx.Err()
+		}
+		return fmt.Errorf("%w: send %s: %v", ErrClosed, method, err)
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return c.Err()
+	}
+}
+
+// writer writes requests one at a time until the connection ends. Each
+// write gets its own timeout, not its caller's context: websocket closes
+// the whole connection when a write's context ends, and one cancelled call
+// must not end the rest.
+func (c *Client) writer() {
+	for {
+		var job writeJob
+		select {
+		case job = <-c.writes:
+		case <-c.done:
+			return
+		}
+		if err := job.ctx.Err(); err != nil {
+			job.done <- err
+			continue
+		}
+		wctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+		c.writing.Store(true)
+		err := c.ws.Write(wctx, websocket.MessageText, job.msg)
+		c.writing.Store(false)
+		cancel()
+		job.done <- err
 	}
 }
 
