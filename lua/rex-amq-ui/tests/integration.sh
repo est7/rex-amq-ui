@@ -21,6 +21,11 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+# dash skips the EXIT trap on a fatal signal: exit on each, so cleanup runs
+# (tests/traps.sh checks this under sh and dash).
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 go -C "$root" build -o "$tmp/rex-amq-ui" ./cmd/rex-amq-ui
 cat >"$tmp/rex-amq-adapter" <<EOF
@@ -120,6 +125,7 @@ echo "  panel layers in the new tab: $in2"
 [ "$in2" = "['normal']" ] || fail "panel not floating normal in the new tab"
 left=$(view | json 'sum(1 for w in d["windows"] if w["window_id"]==sys.argv[1] for l in w.get("layers",[]) if l["kind"]=="floating")' "$window1")
 echo "  floating layers left in the first tab: $left"
+[ "$left" = 0 ] || fail "the move left a floating layer in the first tab"
 [ "$(focused)" = "$panel" ] || fail "moved panel is not focused"
 wait_screen "$panel" "Follow" || fail "moved panel stopped drawing"
 
@@ -153,10 +159,17 @@ for _ in $(seq 1 20); do
   sleep 0.25
 done
 summary
-if [ -n "$(panel_block)" ]; then echo "  after Q the panel's block stays: $(panel_block)"; else echo "  after Q the panel's block and its layer are gone"; fi
+[ -z "$(panel_block)" ] || fail "after Q the panel's block $(panel_block) is still there"
+gone=$(view | json 'sum(1 for w in d["windows"] for l in w.get("layers",[]) for b in l.get("blocks") or [] if b["block_id"]==sys.argv[1])' "$panel")
+[ "$gone" = 0 ] || fail "after Q the old block $panel is still in the session"
+echo "  after Q the panel's block and its layer are gone"
 act amqui_toggle
+old=$panel
 panel=$(panel_block)
 [ -n "$panel" ] || fail "toggle after Q opened no panel"
+[ "$panel" != "$old" ] || fail "toggle after Q found the old block $old"
+[ "$(panel_state)" = normal ] || fail "reopened panel not normal"
+[ "$(focused)" = "$panel" ] || fail "reopened panel not focused"
 wait_screen "$panel" "SYSTEM ALERTS" || fail "the reopened panel did not draw"
 summary
 

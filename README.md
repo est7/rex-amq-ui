@@ -141,11 +141,12 @@ The Graph tab today draws its chrome (the replay bar and the legend) and leaves 
 ```sh
 go test -race ./...                                    # headless: fake Rex control server, recorded adapter streams
 luajit lua/rex-amq-ui/tests/run.lua                    # the plugin, against a stub rex global
+lua/rex-amq-ui/tests/traps.sh                          # integration.sh cleans up when interrupted (fake rex, no server)
 lua/rex-amq-ui/tests/integration.sh                    # live: needs a running local Rex server
 REX_AMQ_ADAPTER_BIN=/path/to/rex-amq-adapter go test -run TestAdapterPanelIntegration ./internal/adapter
 ```
 
-`go test` and the Lua harness never touch Rex. `integration.sh` builds the binary and creates its own Rex session, which it kills on exit. It drives the plugin there through `rex do`, with a fake adapter that replays `testdata/panel` streams. It never selects that session in the app, reloads your config, or touches another session. The last command runs the panel's stream against a real adapter build.
+`go test` and the Lua harness never touch Rex. `integration.sh` builds the binary and creates its own Rex session, which it kills on exit. It drives the plugin there through `rex do`, with a fake adapter that replays `testdata/panel` streams. It never selects that session in the app, reloads your config, or touches another session. An interrupted run (Ctrl-C, `TERM`, `HUP`) still kills the session. The last command runs the panel's stream against a real adapter build.
 
 ## Design
 
