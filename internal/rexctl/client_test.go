@@ -47,6 +47,17 @@ func dial(t *testing.T, s *rexctltest.Server) *rexctl.Client {
 	return c
 }
 
+// attached dials s and attaches to session, as Rex requires before any of
+// the session's methods.
+func attached(t *testing.T, s *rexctltest.Server) *rexctl.Client {
+	t.Helper()
+	c := dial(t, s)
+	if _, err := c.Attach(ctx(t), session); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	return c
+}
+
 func ctx(t *testing.T) context.Context {
 	c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -177,7 +188,7 @@ func TestRexctlAttachReadsTheViewAndOrdersEvents(t *testing.T) {
 // fake against Rex's own input schema and here against the exact request.
 func TestRexctlLayerOperations(t *testing.T) {
 	s := rexctltest.NewServer(t)
-	c := dial(t, s)
+	c := attached(t, s)
 	cx := ctx(t)
 	made, err := c.NewLayer(cx, rexctl.NewLayer{
 		SessionID: session, WindowID: "window:1", Bounds: rexctl.Bounds{0.64, 0.02, 0.35, 0.96},
@@ -236,7 +247,7 @@ func TestRexctlLayerOperations(t *testing.T) {
 
 func TestRexctlBlockSizeAndWrite(t *testing.T) {
 	s := rexctltest.NewServer(t)
-	c := dial(t, s)
+	c := attached(t, s)
 	size, err := c.TerminalSize(ctx(t), session, panel)
 	if err != nil || size != (rexctl.TerminalSize{Columns: 120, Rows: 40, CellWidthPx: 9, CellHeightPx: 22}) {
 		t.Fatalf("size %+v %v", size, err)
@@ -284,7 +295,7 @@ func TestRexctlSelectSessionThroughTheApp(t *testing.T) {
 // event channel; later calls fail at once.
 func TestRexctlConnectionLoss(t *testing.T) {
 	s := rexctltest.NewServer(t)
-	c := dial(t, s)
+	c := attached(t, s)
 	s.Handle("session.view", func(rexctltest.Request) (any, *rexctltest.Error) {
 		s.CloseConnections()
 		return nil, nil
@@ -313,7 +324,7 @@ func TestRexctlErrorsAndLimits(t *testing.T) {
 	s.Handle("session.focus_block", func(rexctltest.Request) (any, *rexctltest.Error) {
 		return nil, &rexctltest.Error{Code: "not_found", Message: "block not found", Status: 404}
 	})
-	c := dial(t, s)
+	c := attached(t, s)
 	if _, err := c.FocusBlock(ctx(t), session, "block:gone"); !rexctl.IsCode(err, rexctl.CodeNotFound) {
 		t.Fatalf("focus of a gone block: %v", err)
 	}

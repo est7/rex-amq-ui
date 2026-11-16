@@ -83,16 +83,32 @@ type Server struct {
 	hellos     []json.RawMessage
 	violations []string
 	view       any
+	readGate   chan struct{} // while set, connections stop reading
 }
 
 // conn is one client connection. Like Rex, it numbers the events it sends
 // from 1, and a response's seq is the seq of the last event sent before
 // the request was answered (0 before any): the client applies an attach's
 // view, then the events with a higher seq, even those that arrived first.
+//
+// Its attachments are its own (a new connection has none), and requests run
+// as Rex runs them: in order, except block.method, which does not wait for
+// earlier requests.
 type conn struct {
 	ws      *websocket.Conn
 	writeMu sync.Mutex
 	seq     int64 // last event seq; guarded by writeMu
+
+	attached map[string]bool // session ids; guarded by Server.mu
+	ordered  chan []byte     // requests answered in order
+}
+
+// sessionMethods need the connection attached to their session_id
+// (session.attach's validation notes): Rex answers conflict otherwise.
+var sessionMethods = map[string]bool{
+	"session.view": true, "session.new_layer": true, "session.disown_block": true, "session.set_layer_state": true,
+	"session.resize_layer": true, "session.focus_block": true, "session.move_block": true, "session.float_block": true,
+	"block.method": true,
 }
 
 // NewServer starts a fake on a Unix socket under a short temporary
@@ -206,9 +222,9 @@ func (s *Server) Hellos() []json.RawMessage {
 	return append([]json.RawMessage(nil), s.hellos...)
 }
 
-// Emit sends every connection a session event.
+// Emit sends a session event to the connections attached to session.
 func (s *Server) Emit(session, name string, payload any) {
-	s.broadcast(func(seq int64) any {
+	s.broadcast(session, func(seq int64) any {
 		return map[string]any{"type": "event", "seq": seq, "payload": map[string]any{"type": "session_event",
 			"payload": map[string]any{"session_id": session, "event": map[string]any{"type": name, "payload": payload}}}}
 	})
@@ -216,7 +232,7 @@ func (s *Server) Emit(session, name string, payload any) {
 
 // EmitServer sends every connection a server event.
 func (s *Server) EmitServer(name string, payload any) {
-	s.broadcast(func(seq int64) any {
+	s.broadcast("", func(seq int64) any {
 		return map[string]any{"type": "event", "seq": seq, "payload": map[string]any{"type": name, "payload": payload}}
 	})
 }
@@ -232,11 +248,48 @@ func (s *Server) CloseConnections() {
 	}
 }
 
-func (s *Server) broadcast(msg func(seq int64) any) {
+// PauseReading stops every connection from reading its next request until
+// resume is called, as a server that stopped reading its socket: a client's
+// writes then block once the socket's buffers fill. A connection already
+// waiting in a read takes one more message before it stops.
+func (s *Server) PauseReading() (resume func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readGate == nil {
+		s.readGate = make(chan struct{})
+	}
+	gate := s.readGate
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			if s.readGate == gate {
+				s.readGate = nil
+			}
+			s.mu.Unlock()
+			close(gate)
+		})
+	}
+}
+
+func (s *Server) waitReadGate() {
+	s.mu.Lock()
+	gate := s.readGate
+	s.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+}
+
+// broadcast sends an event to every connection attached to session, or to
+// every connection for a server event (session "").
+func (s *Server) broadcast(session string, msg func(seq int64) any) {
 	s.mu.Lock()
 	var conns []*conn
 	for c := range s.conns {
-		conns = append(conns, c)
+		if session == "" || c.attached[session] {
+			conns = append(conns, c)
+		}
 	}
 	s.mu.Unlock()
 	for _, c := range conns {
@@ -297,7 +350,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.SetReadLimit(int64(s.MaxMessageBytes))
-	c := &conn{ws: ws}
+	c := &conn{ws: ws, attached: map[string]bool{}, ordered: make(chan []byte, 1024)}
 	ctx := context.Background()
 	_, hello, err := ws.Read(ctx)
 	if err != nil {
@@ -318,7 +371,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	c.send(map[string]any{"type": "welcome", "protocol": Protocol, "api_revision": APIRevision,
 		"limits": map[string]any{"max_message_bytes": s.MaxMessageBytes}, "client": map[string]any{"id": ClientID, "reconnect_token": "token"}})
+	go func() {
+		for msg := range c.ordered {
+			s.request(c, msg)
+		}
+	}()
+	defer close(c.ordered)
 	for {
+		s.waitReadGate()
 		_, msg, err := ws.Read(ctx)
 		if err != nil {
 			s.mu.Lock()
@@ -326,7 +386,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			return
 		}
-		s.request(c, msg)
+		var m struct {
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(msg, &m) == nil && m.Method == "block.method" {
+			go s.request(c, msg)
+			continue
+		}
+		c.ordered <- msg
 	}
 }
 
@@ -350,7 +417,7 @@ func (s *Server) request(c *conn, msg []byte) {
 	// The state the answer reads is taken now: an event the handler sends
 	// comes after it, with a higher seq, though it arrives first.
 	seq := c.watermark()
-	result, rerr := s.answer(req, h)
+	result, rerr := s.answer(c, req, h)
 	out := map[string]any{"type": "response", "id": m.ID, "seq": seq}
 	if rerr != nil {
 		out["error"] = map[string]any{"code": rerr.Code, "message": rerr.Message, "status": rerr.Status}
@@ -360,7 +427,7 @@ func (s *Server) request(c *conn, msg []byte) {
 	c.send(out)
 }
 
-func (s *Server) answer(req Request, h Handler) (any, *Error) {
+func (s *Server) answer(c *conn, req Request, h Handler) (any, *Error) {
 	if in, ok := s.inputs[req.Method]; ok {
 		if err := s.checkInput(req, in); err != nil {
 			s.violate("%s: %v: %s", req.Method, err, req.Payload)
@@ -368,6 +435,21 @@ func (s *Server) answer(req Request, h Handler) (any, *Error) {
 		}
 	} else if h == nil {
 		return nil, &Error{Code: "method_not_found", Message: "no method " + req.Method, Status: 404}
+	}
+	var p struct {
+		SessionID string `json:"session_id"`
+	}
+	_ = json.Unmarshal(req.Payload, &p)
+	s.mu.Lock()
+	if req.Method == "session.attach" {
+		// Attached before the view is read, as Rex does: events from here on
+		// reach the connection.
+		c.attached[p.SessionID] = true
+	}
+	attached := c.attached[p.SessionID]
+	s.mu.Unlock()
+	if sessionMethods[req.Method] && !attached {
+		return nil, &Error{Code: "conflict", Message: "the connection is not attached to " + p.SessionID, Status: 409}
 	}
 	if h != nil {
 		return h(req)
