@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"image/color"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -100,7 +101,10 @@ type Model struct {
 	lay    layer.State
 	pal    theme.Palette
 	termFg color.Color
-	asked  bool // OSC 10/11 sent
+	// askedOwner is the block owner OSC 10/11 was last asked under;
+	// answered, whether the terminal replied.
+	askedOwner string
+	answered   bool
 
 	w, h    int
 	tab     Tab
@@ -176,6 +180,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pal = theme.FromTerminal(m.termFg, m.pal.Bg)
 		}
 	case tea.BackgroundColorMsg:
+		m.answered = true
 		fg := m.termFg
 		if fg == nil {
 			fg = m.pal.Fg
@@ -248,13 +253,15 @@ func (m Model) layerChanged(s layer.State) (tea.Model, tea.Cmd) {
 	return m, m.askColours()
 }
 
-// askColours asks for OSC 10/11 once a Rex app owns the block (before
-// that Rex drops the query) and while the panel is showing.
+// askColours asks for OSC 10/11 while the panel shows, once per owner of
+// its block until the terminal answers: Rex drops the query while no app
+// owns the block, and the launcher owns it for a moment first.
 func (m *Model) askColours() tea.Cmd {
-	if m.asked || !m.lay.Owned || m.paused {
+	o := m.lay.Owner
+	if m.answered || o == "" || o == m.askedOwner || m.paused {
 		return nil
 	}
-	m.asked = true
+	m.askedOwner = o
 	return tea.Batch(tea.RequestForegroundColor, tea.RequestBackgroundColor)
 }
 
@@ -336,7 +343,7 @@ func hintFor(what string, err error) string {
 	case errors.Is(err, layer.ErrRemoteControlOff):
 		return "Rex refused: " + err.Error()
 	case errors.Is(err, layer.ErrDisconnected):
-		return "not connected to Rex"
+		return strings.TrimPrefix(err.Error(), "layer: ")
 	}
 	return what + " failed: " + err.Error()
 }

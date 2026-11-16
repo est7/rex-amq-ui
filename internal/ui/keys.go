@@ -12,11 +12,18 @@ import (
 // the keys every tab shares, then the current tab's.
 func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := k.String()
-	if m.paused && s != "Q" {
-		// A hidden panel takes no keys but Q; its layer shows again first.
-		return m, nil
+	var ask tea.Cmd
+	if m.paused {
+		// The Lua plugin only writes APC sequences, so a key comes from a
+		// human looking at the panel: it shows, though no resume came.
+		m.resume()
+		ask = m.askColours()
 	}
 	m.hint, m.hintBad = "", false
+	if ask != nil {
+		next, cmd := m.key(k)
+		return next, tea.Batch(ask, cmd)
+	}
 	if m.tab == TabMail && m.mail.typing {
 		return m.searchKey(k), nil
 	}

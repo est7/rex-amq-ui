@@ -348,15 +348,17 @@ func TestKeys(t *testing.T) {
 			t.Fatalf("footer %q", foot)
 		}
 	})
-	t.Run("Q quits even while paused; other keys wait", func(t *testing.T) {
+	t.Run("a key on a paused panel resumes it; Q quits", func(t *testing.T) {
 		rec := &recorder{}
 		m := build(t, "edited-crew-attention", w, h, Deps{Layer: rec}, Options{})
 		m = step(t, m, apc.Command{Verb: apc.Pause})
-		next, cmd := m.Update(key("z"))
-		if cmd != nil || next.(Model).size != m.size {
-			t.Fatal("a paused panel took z")
+		// Lua only writes APC: a key means the human is looking at it.
+		m = press(t, m, "tab")
+		if m.Paused() || m.tab != TabMembers {
+			t.Fatalf("paused=%v tab=%v", m.Paused(), m.tab)
 		}
-		_, cmd = m.Update(key("Q"))
+		m = step(t, m, apc.Command{Verb: apc.Pause})
+		_, cmd := m.Update(key("Q"))
 		if cmd == nil {
 			t.Fatal("Q did nothing")
 		}
@@ -381,10 +383,20 @@ func TestKeys(t *testing.T) {
 			t.Fatalf("calls %v", rec.got())
 		}
 	})
-	t.Run("without Rex, actions say so", func(t *testing.T) {
+	t.Run("without Rex, actions say so and why", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{})
 		m = press(t, m, "z")
 		if !contains(m.Frame(), "not connected to Rex") {
+			t.Fatalf("\n%s", plain(m.Frame()))
+		}
+		down := &recorder{fail: map[string]error{"resize": fmt.Errorf("%w: dial unix /x.sock: connect: no such file", layer.ErrDisconnected)}}
+		m = build(t, "edited-crew-attention", w, h, Deps{Layer: down}, Options{})
+		m = step(t, m, layer.State{})
+		if !strings.Contains(lines(m.Frame())[0], "◌ Rex") {
+			t.Fatalf("header %q: a panel that lost Rex should say so", lines(m.Frame())[0])
+		}
+		m = press(t, m, "z")
+		if !contains(m.Frame(), "not connected to Rex: dial unix /x.sock") {
 			t.Fatalf("\n%s", plain(m.Frame()))
 		}
 	})
@@ -432,24 +444,24 @@ func TestPause(t *testing.T) {
 
 func TestTheme(t *testing.T) {
 	w, h := refSize(t, layer.Drawer)
-	m := build(t, "recorded-bare", w, h, Deps{}, Options{})
-	next, cmd := m.Update(layer.State{Connected: true})
-	if cmd != nil {
-		t.Fatal("asked for colours before an app owns the block")
+	asks := func(m Model, msg tea.Msg) (Model, bool) {
+		next, cmd := m.Update(msg)
+		return next.(Model), cmd != nil
 	}
-	m = next.(Model)
+	m := build(t, "recorded-bare", w, h, Deps{}, Options{})
+	m, asked := asks(m, layer.State{Connected: true})
+	if asked {
+		t.Fatal("asked for colours before anyone owns the block")
+	}
 	m = step(t, m, apc.Command{Verb: apc.Pause})
-	next, cmd = m.Update(layer.State{Connected: true, Owned: true})
-	if cmd != nil {
+	if m, asked = asks(m, layer.State{Connected: true, Owner: "client:app"}); asked {
 		t.Fatal("asked for colours while paused")
 	}
-	next, cmd = next.(Model).Update(apc.Command{Verb: apc.Resume})
-	if cmd == nil {
-		t.Fatal("did not ask for colours on resume once owned")
+	if m, asked = asks(m, apc.Command{Verb: apc.Resume}); !asked {
+		t.Fatal("did not ask on resume once owned")
 	}
-	m = next.(Model)
-	if _, again := m.Update(layer.State{Connected: true, Owned: true, Focused: "b"}); again != nil {
-		t.Fatal("asked twice")
+	if m, asked = asks(m, layer.State{Connected: true, Owner: "client:app", Focused: "b"}); asked {
+		t.Fatal("asked the same owner twice")
 	}
 	dark := m.Frame()
 	m = step(t, m, tea.ForegroundColorMsg{Color: color.RGBA{0x30, 0x30, 0x30, 0xff}})
@@ -460,11 +472,20 @@ func TestTheme(t *testing.T) {
 	if bad := holes(m.Frame(), w, h); bad != nil {
 		t.Fatal(bad)
 	}
+	if _, asked = asks(m, layer.State{Connected: true, Owner: "client:other"}); asked {
+		t.Fatal("asked again after the terminal answered")
+	}
 
-	// Owned already when the panel attaches: it asks at once.
+	// The launcher owns the block for a moment before Rex.app takes it:
+	// a query then goes unanswered, so the app's claim asks again.
 	fresh := build(t, "recorded-bare", w, h, Deps{}, Options{})
-	if _, cmd := fresh.Update(layer.State{Connected: true, Owned: true}); cmd == nil {
+	fresh, asked = asks(fresh, layer.State{Connected: true, Owner: "client:launcher"})
+	if !asked {
 		t.Fatal("did not ask when owned at attach")
+	}
+	fresh, _ = asks(fresh, layer.State{Connected: true})
+	if _, asked = asks(fresh, layer.State{Connected: true, Owner: "client:app"}); !asked {
+		t.Fatal("did not ask the app that took the block over")
 	}
 }
 

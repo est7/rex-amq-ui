@@ -81,7 +81,7 @@ func TestSurface(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := layer.Open(ctx, cl, layer.Launch{Session: surfSession, Size: c.size, Command: []string{"/bin/rex-amq-ui"}}); err != nil {
+			if _, err := layer.Open(ctx, cl, layer.Launch{Session: surfSession, Board: c.size == layer.Board, Command: []string{"/bin/rex-amq-ui"}}); err != nil {
 				t.Fatal(err)
 			}
 			cl.Close()
@@ -225,7 +225,7 @@ func TestSurface(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			o, err := layer.Open(ctx, cl, layer.Launch{Session: surfSession, Size: layer.Drawer, Command: []string{"/bin/rex-amq-ui"}})
+			o, err := layer.Open(ctx, cl, layer.Launch{Session: surfSession, Command: []string{"/bin/rex-amq-ui"}})
 			cl.Close()
 			if err != nil {
 				t.Fatal(err)

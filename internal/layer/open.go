@@ -13,9 +13,10 @@ import (
 type Launch struct {
 	// Session is the Rex session to open the panel in.
 	Session string
-	// Size is the size of a new panel, and the size a restored one is set
-	// to.
-	Size Size
+	// Board opens a new panel at Board size, and sets a restored one to
+	// it. Without it a new panel is a Drawer and a restored one keeps the
+	// size the human left it at.
+	Board bool
 	// Tab is the tab to show (an apc.Tabs name), or "" for the panel's
 	// default.
 	Tab string
@@ -33,9 +34,10 @@ type Opened struct {
 }
 
 // Open shows the session's panel and returns it. A panel already open in
-// the session (a floating block labelled Label) is restored: resized to
-// l.Size, set normal and focused, then told to resume and to show l.Tab.
-// Otherwise a new floating layer at l.Size's bounds in the active window
+// the session (a floating block labelled Label) is restored: made a Board
+// when l.Board, set normal and focused, then told to resume and to show
+// l.Tab. Otherwise a new floating layer at its size's bounds in the active
+// window
 // runs l.Command, started at the size the window gives those bounds so its
 // first frame is not 80x24, and is disowned so Rex.app sizes it from then
 // on.
@@ -57,8 +59,8 @@ func Open(ctx context.Context, c *rexctl.Client, l Launch) (Opened, error) {
 
 func restore(ctx context.Context, c *rexctl.Client, l Launch, block string, layer rexctl.Layer) (Opened, error) {
 	o := Opened{LayerID: layer.LayerID, BlockID: block, Restored: true}
-	if layer.Bounds != l.Size.Bounds() {
-		if _, err := c.ResizeLayer(ctx, l.Session, layer.LayerID, l.Size.Bounds()); err != nil {
+	if l.Board && SizeOf(layer.Bounds) != Board {
+		if _, err := c.ResizeLayer(ctx, l.Session, layer.LayerID, Board.Bounds()); err != nil {
 			return o, err
 		}
 	}
@@ -78,7 +80,7 @@ func restore(ctx context.Context, c *rexctl.Client, l Launch, block string, laye
 }
 
 func create(ctx context.Context, c *rexctl.Client, l Launch, v rexctl.View) (Opened, error) {
-	bounds := l.Size.Bounds()
+	bounds := l.size().Bounds()
 	opts := rexctl.TerminalOptions{Shell: "none", Command: argv(l, v.FocusedBlock())}
 	if size, ok := startSize(ctx, c, l.Session, v, bounds); ok {
 		opts.Size = &size
@@ -100,6 +102,13 @@ func create(ctx context.Context, c *rexctl.Client, l Launch, v rexctl.View) (Ope
 	return o, nil
 }
 
+func (l Launch) size() Size {
+	if l.Board {
+		return Board
+	}
+	return Drawer
+}
+
 // argv is the panel's command line. --focus names the pane the human was
 // in, which the panel marks until Rex reports another.
 func argv(l Launch, focused string) []string {
@@ -110,7 +119,7 @@ func argv(l Launch, focused string) []string {
 	if l.Tab != "" {
 		args = append(args, "--tab", l.Tab)
 	}
-	if l.Size == Board {
+	if l.Board {
 		args = append(args, "--board")
 	}
 	return args

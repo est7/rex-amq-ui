@@ -16,9 +16,11 @@ type State struct {
 	// Focused is the pane the human was last in outside the panel, "" when
 	// not known yet.
 	Focused string
-	// Owned: a Rex app owns the panel's block, so the terminal answers
-	// colour queries (OSC 10/11) with the app's real colours.
-	Owned bool
+	// Owner is the client that owns the panel's block, "" for none. Once an
+	// app owns it, the terminal answers colour queries (OSC 10/11) with
+	// the app's real colours; until then Rex drops them. The launcher owns
+	// the block briefly before it hands it over.
+	Owner string
 	// Minimized: the panel's layer is minimized.
 	Minimized bool
 	// Size is the size the layer's bounds are closest to.
@@ -34,19 +36,26 @@ type Panel struct {
 
 	mu    sync.Mutex
 	c     *rexctl.Client // nil while disconnected
+	down  error          // why it is disconnected
 	layer string
 	state State
 	rev   int64
 }
 
-// Connect dials the server (REX_SERVER), attaches to session, and finds
-// the panel's layer from its block: block (REX_BLOCK), or the block
-// labelled Label when "". focused is the pane the human was in when the
-// panel opened (`open` passes it as --focus); it stands until Rex reports
-// focus on another pane.
-func Connect(ctx context.Context, server, session, block, focused string) (*Panel, error) {
-	p := &Panel{server: server, session: session, block: block}
+// New is the panel whose block is block (REX_BLOCK), or the block labelled
+// Label when "", in session on server (REX_SERVER). focused is the pane
+// the human was in when the panel opened (`open` passes it as --focus); it
+// stands until Rex reports focus on another pane. It is not connected
+// until Watch connects it.
+func New(server, session, block, focused string) *Panel {
+	p := &Panel{server: server, session: session, block: block, down: errors.New("not connected yet")}
 	p.state.Focused = focused
+	return p
+}
+
+// Connect is New, connected now.
+func Connect(ctx context.Context, server, session, block, focused string) (*Panel, error) {
+	p := New(server, session, block, focused)
 	c, err := rexctl.Dial(ctx, server)
 	if err != nil {
 		return nil, err
@@ -71,7 +80,7 @@ func (p *Panel) adopt(ctx context.Context, c *rexctl.Client) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.c, p.block, p.layer, p.rev = c, block, layer.LayerID, a.View.Revision
+	p.c, p.down, p.block, p.layer, p.rev = c, nil, block, layer.LayerID, a.View.Revision
 	p.state = p.next(a.View)
 	return nil
 }
@@ -89,7 +98,7 @@ func (p *Panel) next(v rexctl.View) State {
 		s.Size = SizeOf(l.Bounds)
 		for _, b := range l.Blocks {
 			if b.BlockID == p.block {
-				s.Owned = b.Owner != ""
+				s.Owner = b.Owner
 			}
 		}
 	}
@@ -114,7 +123,7 @@ func (p *Panel) client() (*rexctl.Client, string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.c == nil {
-		return nil, "", ErrDisconnected
+		return nil, "", fmt.Errorf("%w: %v", ErrDisconnected, p.down)
 	}
 	return p.c, p.layer, nil
 }
@@ -222,17 +231,18 @@ func (p *Panel) Watch(ctx context.Context, send func(State)) {
 			send(s)
 		}
 	}
-	wait := minRedial
+	wait := time.Duration(0) // the first connection is made at once
 	for ctx.Err() == nil {
 		c, _, err := p.client()
 		if err == nil {
 			p.follow(ctx, c, emit)
 			c.Close()
 			p.mu.Lock()
-			p.c = nil
+			p.c, p.down = nil, fmt.Errorf("connection ended: %w", c.Err())
 			p.state.Connected = false
 			p.mu.Unlock()
 			emit()
+			wait = minRedial
 			continue
 		}
 		select {
@@ -247,10 +257,12 @@ func (p *Panel) Watch(ctx context.Context, send func(State)) {
 			}
 		}
 		if err != nil {
-			wait = min(wait*2, maxRedial)
+			p.mu.Lock()
+			p.down = err
+			p.mu.Unlock()
+			wait = min(max(wait*2, minRedial), maxRedial)
 			continue
 		}
-		wait = minRedial
 		emit()
 	}
 }
@@ -280,7 +292,7 @@ func (p *Panel) apply(ctx context.Context, c *rexctl.Client, e rexctl.Event) boo
 	if o, ok := e.OwnerChanged(); ok {
 		p.mu.Lock()
 		if o.BlockID == p.block {
-			p.state.Owned = o.Owner != ""
+			p.state.Owner = o.Owner
 		}
 		p.mu.Unlock()
 	}
@@ -297,6 +309,11 @@ func (p *Panel) apply(ctx context.Context, c *rexctl.Client, e rexctl.Event) boo
 			if v.Revision > p.rev {
 				p.rev = v.Revision
 				p.state = p.next(v)
+				// The panel's block can move to a new layer (Lua moves it
+				// to the active tab with move_block and float_block).
+				if _, l, ok := v.LayerOf(p.block); ok && l.Kind == rexctl.LayerFloating {
+					p.layer = l.LayerID
+				}
 			}
 			p.mu.Unlock()
 		}

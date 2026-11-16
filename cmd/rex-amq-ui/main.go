@@ -110,17 +110,14 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Outside Rex (no server or session) the panel still shows the stream;
+	// its actions say "not connected to Rex". In Rex, Watch makes the
+	// connection and keeps it, and the header shows while it is down.
 	var ctl ui.Controller
 	var panel *layer.Panel
 	if cfg.Server != "" && cfg.Session != "" {
-		cctx, ccancel := context.WithTimeout(ctx, 5*time.Second)
-		p, err := layer.Connect(cctx, cfg.Server, cfg.Session, cfg.Block, cfg.Options.Focused)
-		ccancel()
-		if err == nil {
-			panel, ctl = p, p
-		}
-		// Without Rex the panel still shows the stream; its actions say
-		// "not connected to Rex".
+		panel = layer.New(cfg.Server, cfg.Session, cfg.Block, cfg.Options.Focused)
+		ctl = panel
 	}
 	cache, _ := os.UserCacheDir()
 	model := ui.New(ui.Deps{
@@ -207,9 +204,7 @@ func runOpen(args []string, getenv func(string) string, stdout, stderr io.Writer
 		return 2
 	}
 	l := layer.Launch{Session: cmp(*session, getenv("REX_SESSION")), Tab: *tab}
-	if *board {
-		l.Size = layer.Board
-	}
+	l.Board = *board
 	server := getenv("REX_SERVER")
 	if server == "" || l.Session == "" {
 		fmt.Fprintln(stderr, "rex-amq-ui open: needs $REX_SERVER and a session (--session or $REX_SESSION)")

@@ -80,7 +80,7 @@ func TestOpenCreatesSizedDisownedLayer(t *testing.T) {
 		s := rexctltest.NewServer(t)
 		halfWindow(s)
 		s.SetView(view(3, paneA, false, "", "", rexctl.Bounds{}))
-		o, err := Open(context.Background(), dial(t, s), Launch{Session: sess, Size: size, Tab: "members", Command: []string{"/bin/rex-amq-ui", "--adapter-bin", "/x/adapter"}})
+		o, err := Open(context.Background(), dial(t, s), Launch{Session: sess, Board: size == Board, Tab: "members", Command: []string{"/bin/rex-amq-ui", "--adapter-bin", "/x/adapter"}})
 		if err != nil || o.Restored || o.BlockID == "" {
 			t.Fatalf("%v: %+v %v", size, o, err)
 		}
@@ -131,7 +131,7 @@ func TestOpenRestoresTheOpenPanel(t *testing.T) {
 	s := rexctltest.NewServer(t)
 	halfWindow(s)
 	s.SetView(view(4, paneA, true, rexctl.LayerMinimized, "client:app", Drawer.Bounds()))
-	o, err := Open(context.Background(), dial(t, s), Launch{Session: sess, Size: Board, Tab: "mail", Command: []string{"/bin/rex-amq-ui"}})
+	o, err := Open(context.Background(), dial(t, s), Launch{Session: sess, Board: true, Tab: "mail", Command: []string{"/bin/rex-amq-ui"}})
 	if err != nil || !o.Restored || o.BlockID != panel || o.LayerID != player {
 		t.Fatalf("%+v %v", o, err)
 	}
@@ -174,7 +174,7 @@ func TestPanelLeavesInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st := p.State(); st.Focused != paneB || !st.Owned || st.Minimized || st.Size != Drawer {
+	if st := p.State(); st.Focused != paneB || st.Owner == "" || st.Minimized || st.Size != Drawer {
 		t.Fatalf("state %+v: the panel's own focus must not replace the pane it was opened over", st)
 	}
 	before := len(s.Requests())
@@ -231,10 +231,10 @@ func TestWatchFollowsFocusOwnerAndState(t *testing.T) {
 		defer mu.Unlock()
 		t.Fatalf("%s: states %+v", what, got)
 	}
-	waitFor("initial", func(st State) bool { return st.Connected && !st.Owned && st.Focused == "" })
+	waitFor("initial", func(st State) bool { return st.Connected && st.Owner == "" && st.Focused == "" })
 
 	s.Emit(sess, rexctl.EventBlockOwnerChanged, map[string]any{"block_id": panel, "owner": "client:app", "reason": "take"})
-	waitFor("owner claimed", func(st State) bool { return st.Owned })
+	waitFor("owner claimed", func(st State) bool { return st.Owner != "" })
 
 	s.SetView(view(6, paneB, true, rexctl.LayerMinimized, "client:app", Board.Bounds()))
 	s.Emit(sess, rexctl.EventSessionViewChanged, map[string]any{"revision": 6})
@@ -249,7 +249,7 @@ func TestWatchFollowsFocusOwnerAndState(t *testing.T) {
 	s.SetView(view(3, paneA, true, rexctl.LayerMinimized, "client:app", Drawer.Bounds()))
 	s.Emit(sess, rexctl.EventSessionViewChanged, map[string]any{"revision": 3})
 	s.Emit(sess, rexctl.EventBlockOwnerChanged, map[string]any{"block_id": panel, "previous": "client:app", "reason": "lost"})
-	waitFor("owner lost", func(st State) bool { return !st.Owned })
+	waitFor("owner lost", func(st State) bool { return st.Owner == "" })
 	mu.Lock()
 	if last := got[len(got)-1]; last.Minimized || last.Focused != paneB || last.Size != Board {
 		t.Fatalf("a stale view was applied: %+v", last)
@@ -259,7 +259,7 @@ func TestWatchFollowsFocusOwnerAndState(t *testing.T) {
 	// The connection drops; Watch reconnects, attaches again, rereads.
 	s.SetView(view(9, paneA, true, "", "client:app", Drawer.Bounds()))
 	s.CloseConnections()
-	waitFor("reconnected", func(st State) bool { return st.Connected && st.Focused == paneA && st.Size == Drawer && st.Owned })
+	waitFor("reconnected", func(st State) bool { return st.Connected && st.Focused == paneA && st.Size == Drawer && st.Owner != "" })
 	attaches := 0
 	for _, m := range methods(s) {
 		if m == "session.attach" {
@@ -280,4 +280,97 @@ func TestWatchFollowsFocusOwnerAndState(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+func TestPanelFollowsItsLayerWhenMoved(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	s.SetView(view(5, panel, true, "", "client:app", Drawer.Bounds()))
+	p, err := Connect(context.Background(), s.URL, sess, panel, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	moved := make(chan struct{}, 1)
+	go p.Watch(ctx, func(st State) {
+		if st.Size == Board {
+			moved <- struct{}{}
+		}
+	})
+	// Lua moved the panel to another tab: move_block + float_block make it
+	// a new layer.
+	v := view(6, panel, true, "", "client:app", Board.Bounds())
+	v.Windows[0].Layers[1].LayerID = "layer:moved"
+	s.SetView(v)
+	s.Emit(sess, rexctl.EventSessionViewChanged, map[string]any{"revision": 6})
+	select {
+	case <-moved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the move was not seen")
+	}
+	if err := p.Minimize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := s.Last("session.set_layer_state")
+	var got struct {
+		LayerID string `json:"layer_id"`
+	}
+	r.Decode(&got)
+	if got.LayerID != "layer:moved" {
+		t.Fatalf("minimized %q, the panel's old layer", got.LayerID)
+	}
+}
+
+func TestOpenKeepsARestoredPanelsSize(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		at    rexctl.Bounds
+		board bool
+		want  []string
+	}{
+		{"zoomed panel, plain open", Board.Bounds(), false, []string{"session.attach", "session.set_layer_state", "block.method"}},
+		{"drawer, --board", Drawer.Bounds(), true, []string{"session.attach", "session.resize_layer", "session.set_layer_state", "block.method"}},
+		{"board moved a little, --board", rexctl.Bounds{0.05, 0.06, 0.88, 0.88}, true, []string{"session.attach", "session.set_layer_state", "block.method"}},
+	} {
+		s := rexctltest.NewServer(t)
+		halfWindow(s)
+		s.SetView(view(4, paneA, true, rexctl.LayerMinimized, "client:app", c.at))
+		if _, err := Open(context.Background(), dial(t, s), Launch{Session: sess, Board: c.board, Command: []string{"/bin/rex-amq-ui"}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := methods(s); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: calls %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestWatchMakesTheFirstConnection(t *testing.T) {
+	p := New("unix:///nonexistent/rex.sock", sess, panel, paneA)
+	if err := p.Minimize(context.Background()); !errors.Is(err, ErrDisconnected) {
+		t.Fatalf("before any connection: %v", err)
+	}
+	s := rexctltest.NewServer(t)
+	s.SetView(view(5, panel, true, "", "client:app", Drawer.Bounds()))
+	p = New(s.URL, sess, panel, paneA)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	up := make(chan State, 8)
+	go p.Watch(ctx, func(st State) { up <- st })
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case st := <-up:
+			if st.Connected {
+				if st.Owner != "client:app" || st.Focused != paneA {
+					t.Fatalf("state %+v", st)
+				}
+				if err := p.Minimize(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("Watch never connected")
+		}
+	}
 }

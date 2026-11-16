@@ -82,7 +82,11 @@ func (m Model) header(c *canvas) {
 	default:
 		live = Span{Text: "◌ Connecting", Fg: p.Faint}
 	}
-	c.addLR(p.Bg, left, []Span{live, {Text: "  " + m.size.String() + " ", Fg: p.Muted}})
+	right := []Span{live, {Text: "  " + m.size.String() + " ", Fg: p.Muted}}
+	if m.deps.Layer != nil && !m.lay.Connected {
+		right = append([]Span{{Text: "◌ Rex  ", Fg: p.Yellow}}, right...)
+	}
+	c.addLR(p.Bg, left, right)
 }
 
 func (m Model) tabBar(c *canvas) {

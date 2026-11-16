@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,10 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 // filter, adapter stream) on pipes against a fake adapter that sends its
 // snapshot, then the rest of its stream once the test says so.
 func TestPanelProgram(t *testing.T) {
+	// The panel forces TrueColor: an environment that asks for no colour
+	// must not strip its backgrounds.
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("TERM", "dumb")
 	dir := t.TempDir()
 	fixture, err := filepath.Abs(filepath.Join("..", "..", "testdata", "panel", "edited-crew-attention.ndjson"))
 	if err != nil {
@@ -120,4 +125,69 @@ func TestPanelProgram(t *testing.T) {
 	if strings.Contains(raw, "amqui") || strings.Contains(raw, "\x1b_") {
 		t.Fatal("APC bytes reached the panel's output")
 	}
+	if !strings.Contains(raw, "48;2;") {
+		t.Fatal("no truecolor background in the output")
+	}
+	seen, bad := erases(raw)
+	if bad != nil {
+		t.Fatalf("erases on the default background: %v", bad)
+	}
+	t.Logf("line erases the renderer used, all under a set background: %v", seen)
+}
+
+func TestErasesCheckDetectsDefaultBackground(t *testing.T) {
+	if _, bad := erases("\x1b[48;2;1;2;3mab\x1b[38;2;49;0;0mc\x1b[K"); bad != nil {
+		t.Fatalf("an erase under a background flagged: %v", bad)
+	}
+	for _, raw := range []string{"ab\x1b[K", "\x1b[48;2;1;2;3mab\x1b[m\x1b[5X", "\x1b[48;5;3ma\x1b[49m\x1b[K"} {
+		if _, bad := erases(raw); bad == nil {
+			t.Errorf("%q: not detected", raw)
+		}
+	}
+}
+
+var csi = regexp.MustCompile(`\x1b\[([0-9;:?]*)([@-~])`)
+
+// erases checks that the renderer erases within a line (EL K, ECH X) only
+// while a background colour is set: the cells it clears then keep the
+// panel's background on a terminal with bce (Rex's TERM, xterm-256color,
+// declares it). It returns the erase sequences seen and those that erase
+// on the default background.
+func erases(raw string) (seen map[string]int, bad []string) {
+	seen = map[string]int{}
+	bg := false
+	for _, m := range csi.FindAllStringSubmatch(raw, -1) {
+		params, final := m[1], m[2]
+		switch final {
+		case "m":
+			ps := strings.Split(params, ";")
+			for i := 0; i < len(ps); i++ {
+				switch p := ps[i]; {
+				case p == "" || p == "0" || p == "49":
+					bg = false
+				case p == "48":
+					bg = true
+					if i+1 < len(ps) && ps[i+1] == "2" {
+						i += 4
+					} else {
+						i += 2
+					}
+				case p == "38" || p == "58":
+					if i+1 < len(ps) && ps[i+1] == "2" {
+						i += 4
+					} else {
+						i += 2
+					}
+				case len(p) == 2 && (p[0] == '4' || p == "10"):
+					bg = true
+				}
+			}
+		case "K", "X":
+			seen["CSI "+params+final]++
+			if !bg {
+				bad = append(bad, "CSI "+params+final)
+			}
+		}
+	}
+	return seen, bad
 }
