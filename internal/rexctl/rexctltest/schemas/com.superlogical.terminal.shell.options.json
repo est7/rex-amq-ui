@@ -1,0 +1,168 @@
+{
+  "creator": "com.superlogical.terminal",
+  "flavor": "com.superlogical.terminal.shell",
+  "options_schema": {
+    "type": "object",
+    "properties": {
+      "shell": {
+        "type": "string",
+        "description": "The shell to start, or to run command through, such as /bin/zsh or fish. Empty uses the user's default shell. Set it to 'none' to start command directly, with no shell."
+      },
+      "command": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "A program and its arguments, to run instead of an interactive shell. Unless shell is 'none', the shell reads its startup files first, so the program is found on the PATH they set. The arguments reach the program unchanged."
+      },
+      "args": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "Deprecated: use command instead. Starts shell directly as the terminal's program, with these arguments. Can't be sent together with command."
+      },
+      "login": {
+        "type": [
+          "null",
+          "boolean"
+        ],
+        "description": "Whether to start the shell as a login shell, which reads the account's profile. Left out, it is true. On Windows, it is false unless command runs through a shell."
+      },
+      "interactive": {
+        "type": "boolean",
+        "description": "Whether the shell that command runs through also reads its interactive startup files, such as ~/.zshrc, so the program finds what the user's terminals find. They can print output or ask questions before the program starts. Only applies to command run through a shell."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "The directory to start in. Empty, or a path that isn't a directory on the server's machine, starts in the user's home directory."
+      },
+      "path_prepend": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "Directories to put at the front of the program's PATH, in this order. A login shell's startup files can still change PATH."
+      },
+      "size": {
+        "type": [
+          "null",
+          "object"
+        ],
+        "properties": {
+          "columns": {
+            "type": "integer",
+            "description": "The width in columns, that is, characters per line, from 1 to 65535.",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "rows": {
+            "type": "integer",
+            "description": "The height in rows, from 1 to 65535.",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "cell_width_px": {
+            "type": [
+              "null",
+              "integer"
+            ],
+            "description": "The width of one character cell in pixels, from 1 to 65535. Send it together with cell_height_px, or leave both out to keep the current cell size.",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "cell_height_px": {
+            "type": [
+              "null",
+              "integer"
+            ],
+            "description": "The height of one character cell in pixels, from 1 to 65535. Send it together with cell_width_px, or leave both out to keep the current cell size.",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "description": "The terminal's starting size. Left out, it starts at 80 columns by 24 rows.",
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "additionalProperties": false
+      },
+      "theme": {
+        "type": "object",
+        "properties": {
+          "foreground": {
+            "type": "string",
+            "description": "The default text color, as hex RRGGBB or #RRGGBB, such as #d6deeb. Empty or left out uses the built-in color."
+          },
+          "background": {
+            "type": "string",
+            "description": "The default background color, as hex RRGGBB or #RRGGBB, such as #011627. Empty or left out uses the built-in color."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "The cursor color, as hex RRGGBB or #RRGGBB, such as #80a4c2. Empty or left out uses the built-in color."
+          },
+          "palette": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Changes to the 256-color palette, each written as index=RRGGBB or index=#RRGGBB with an index from 0 to 255, such as 1=#ef5350. Colors not listed keep their built-in values."
+          },
+          "scheme": {
+            "type": "string",
+            "description": "Whether the theme is 'light' or 'dark', which programs in the terminal can ask for. If empty, the terminal decides from how bright background is, and treats no background as dark."
+          }
+        },
+        "description": "The terminal's default colors, in the same form that set_theme takes. Left out, the terminal uses its built-in colors.",
+        "additionalProperties": false
+      },
+      "initial_input": {
+        "type": "string",
+        "description": "Text to type into the terminal once its program starts, sent exactly as given. No newline is added, so end the text with one to run a command."
+      },
+      "exit": {
+        "type": [
+          "null",
+          "object"
+        ],
+        "properties": {
+          "on_completion": {
+            "type": [
+              "null",
+              "boolean"
+            ],
+            "description": "Whether to close the terminal when its program exits. A quick failure leaves it open either way. Defaults to true.",
+            "default": true
+          },
+          "quick_exit_threshold_ms": {
+            "type": [
+              "null",
+              "integer"
+            ],
+            "description": "The longest run, in milliseconds, that counts as quick. A program that fails within this time leaves the terminal open. Defaults to 250.",
+            "default": 250,
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "description": "When to close the terminal after its program exits. Left out, it closes after most exits but stays open after a quick failure, so the user can read the error.",
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  }
+}
