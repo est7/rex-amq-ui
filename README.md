@@ -99,7 +99,7 @@ What `Cmd+Shift+A` does depends on where the panel is:
 
 `Cmd+Shift+U` asks `rex-amq-ui waiting --json` who waits on you. Nobody: it logs `rex-amq-ui: nobody waits`. One member whose pane still exists: it hides the panel if it is up and focuses that pane, switching tabs if needed. Several, or one whose pane is gone: it shows the panel on Overview, where the alerts are.
 
-Rex's Lua has no toast, so a failure is a `rex-amq-ui: …` line in the Rex server log and the action's result (`rex do amqui_toggle --json` prints it). The plugin never raises an error dialog.
+Rex's Lua has no toast, so a key press that finds nobody waiting, or fails, shows nothing on screen. The plugin writes a `rex-amq-ui: …` line with `rex.log` and returns the outcome as the action's result. `rex do amqui_toggle --json` prints both, which is the way to see why a key did nothing. The Rex docs do not say where `rex.log` lines from a key press go. The plugin never raises an error dialog.
 
 ## Command line
 
