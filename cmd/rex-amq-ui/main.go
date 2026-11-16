@@ -7,6 +7,10 @@
 //	rex-amq-ui open [--session S] [--tab T] [--board] [--adapter-bin P]
 //	    the launcher: open the session's panel, or restore the open one,
 //	    print {"layer_id","block_id","restored"} as JSON, and exit
+//	rex-amq-ui waiting --json [--session S] [--adapter-bin P]
+//	    print who in the session waits on the human, from the adapter's
+//	    first snapshot, as one JSON line, and exit (the Rex plugin's
+//	    waiting key reads it)
 package main
 
 import (
@@ -43,6 +47,9 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "open" {
 		return runOpen(args[1:], os.Getenv, stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "waiting" {
+		return runWaiting(args[1:], os.Getenv, stdout, stderr, waitingTimeout)
 	}
 	fs := flag.NewFlagSet("rex-amq-ui", flag.ContinueOnError)
 	fs.SetOutput(stderr)
