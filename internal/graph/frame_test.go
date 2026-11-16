@@ -11,6 +11,7 @@ import (
 	"github.com/est7/rex-amq-ui/internal/graph"
 	"github.com/est7/rex-amq-ui/internal/raster"
 	"github.com/est7/rex-amq-ui/internal/raster/rastertest"
+	"github.com/est7/rex-amq-ui/internal/theme"
 )
 
 // crew is a six-member crew with a departed implementer and the human
@@ -86,7 +87,7 @@ var frameSizes = []struct {
 func render(m *graph.Model, sz graph.Size) *raster.Canvas {
 	w, h := sz.Pixels()
 	c := raster.NewCanvas(w, h, sz.Cell)
-	graph.Paint(c, m.Scene(sz), graph.Everforest())
+	graph.Paint(c, m.Scene(sz), graph.FromTheme(theme.Default()))
 	return c
 }
 
@@ -102,13 +103,8 @@ func TestReplayReferenceFrames(t *testing.T) {
 	}
 	t.Run("replay-board-9x22", func(t *testing.T) {
 		m, c := crewModel()
-		for range 8 {
-			m.Prev()
-		}
+		m.Show("m11", false) // 11 of 19
 		c.Advance(400 * time.Millisecond)
-		if st := m.Status(); st.Live || st.Shown != 11 || st.Total != 19 {
-			t.Fatalf("status %+v, want 11/19 in replay", st)
-		}
 		rastertest.Golden(t, "../../testdata/graph/replay-board-9x22.png", render(m, frameSizes[0].size).Image())
 	})
 }
@@ -189,7 +185,7 @@ func BenchmarkGraphFrame(b *testing.B) {
 			m, _ := crewModel()
 			w, h := fs.size.Pixels()
 			c := raster.NewCanvas(w, h, fs.size.Cell)
-			pal := graph.Everforest()
+			pal := graph.FromTheme(theme.Default())
 			for b.Loop() {
 				graph.Paint(c, m.Scene(fs.size), pal)
 			}

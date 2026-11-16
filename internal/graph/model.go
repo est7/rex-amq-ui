@@ -2,9 +2,10 @@
 // picture: who talks to whom, how much, and in what state, replayable one
 // message at a time.
 //
-// Model owns the replay cursor, the Hide-retired toggle, the selection and
-// the animation clock; Scene projects it, at a given pixel size, into
-// placed nodes and curved edges; Paint draws a Scene on a raster.Canvas.
+// The panel owns the replay cursor and the Hide-retired toggle and hands
+// them over with Show; Model owns the selection, the pulses and the
+// animation clock. Scene projects it, at a given pixel size, into placed
+// nodes and curved edges; Paint draws a Scene on a raster.Canvas.
 package graph
 
 import (
@@ -47,9 +48,9 @@ type Model struct {
 	index map[string]int
 	ready bool
 
-	live bool
-	// shown is how many of msgs replay shows; read it through n().
-	shown int
+	// at is the replay cursor, the id of the last message shown; "" (or an
+	// id no longer in msgs) is Live.
+	at string
 
 	hideRetired bool
 	paused      bool
@@ -64,20 +65,21 @@ type pulse struct {
 
 // New is a Model reading time from clock. It starts Live.
 func New(clock func() time.Time) *Model {
-	return &Model{clock: clock, epoch: clock(), live: true}
+	return &Model{clock: clock, epoch: clock()}
 }
 
 // Update takes the latest state. In Live, mail not seen before pulses
 // along its edges, except in the first snapshot, whose mail is history; a
 // state before any snapshot (adapter.State.Ready false) does not count as
-// one. In replay, the cursor stays where it is.
+// one. In replay, the cursor stays on its message; when that message
+// leaves the state, the graph is Live.
 func (m *Model) Update(st adapter.State) {
 	now := m.clock()
 	msgs := slices.Clone(st.Messages)
 	slices.SortStableFunc(msgs, func(a, b adapter.Message) int {
 		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
 	})
-	if m.ready && m.live {
+	if m.ready && m.live() {
 		for _, x := range msgs {
 			if _, seen := m.index[x.ID]; !seen {
 				m.pulse(x, now)
@@ -89,57 +91,46 @@ func (m *Model) Update(st adapter.State) {
 		m.index[x.ID] = i
 	}
 	m.st, m.msgs, m.ready = st, msgs, st.Ready()
-	m.shown = min(m.shown, len(msgs))
+	if m.live() {
+		m.at = ""
+	}
 	m.prune(now)
+}
+
+// live reports whether the graph follows the latest mail.
+func (m *Model) live() bool {
+	_, ok := m.index[m.at]
+	return m.at == "" || !ok
 }
 
 // n is how many messages, oldest first, the graph shows.
 func (m *Model) n() int {
-	if m.live {
+	if m.live() {
 		return len(m.msgs)
 	}
-	return m.shown
+	return m.index[m.at] + 1
 }
 
-// Prev steps the replay back one message (from Live, to the one before
-// the latest); it stops at the first.
-func (m *Model) Prev() { m.step(-1) }
-
-// Next steps the replay forward one message; at the latest it stays in
-// replay, so mail arriving meanwhile does not move the picture.
-func (m *Model) Next() {
-	if !m.live {
-		m.step(+1)
-	}
-}
-
-func (m *Model) step(d int) {
-	if len(m.msgs) == 0 {
-		return
-	}
-	n := min(max(m.n()+d, 1), len(m.msgs))
-	changed := n != m.n()
-	m.live, m.shown = false, n
-	if changed {
-		m.pulse(m.msgs[n-1], m.clock())
-	}
-}
-
-// Live returns to following the latest mail; the messages it reveals
-// pulse.
-func (m *Model) Live() {
-	if m.live {
-		return
-	}
+// Show sets the replay cursor to the message with id at ("" for Live, as
+// is an id not in the state) and whether retired members are hidden. A
+// cursor that moved pulses its message; a return to Live pulses the mail
+// it reveals.
+func (m *Model) Show(at string, hideRetired bool) {
 	now := m.clock()
-	for _, x := range m.msgs[max(m.shown, len(m.msgs)-revealPulses):] {
-		m.pulse(x, now)
+	wasLive, was := m.live(), m.n()
+	m.at, m.hideRetired = at, hideRetired
+	switch n := m.n(); {
+	case m.live():
+		m.at = ""
+		if !wasLive {
+			for _, x := range m.msgs[max(was, len(m.msgs)-revealPulses):] {
+				m.pulse(x, now)
+			}
+		}
+	case n != was || wasLive:
+		m.pulse(m.msgs[n-1], now)
 	}
-	m.live = true
 }
-
-// ToggleHideRetired hides or shows departed members and their mail.
-func (m *Model) ToggleHideRetired() { m.hideRetired = !m.hideRetired }
 
 // SetPaused stops (or resumes) animation: the panel is minimized or
 // another tab is showing.
@@ -179,24 +170,9 @@ func (m *Model) drawn(p pulse, now time.Time) bool {
 	return ok && i < m.n() && now.Sub(p.at) < pulseLife
 }
 
-// Status is what the replay bar shows.
-func (m *Model) Status() Status {
-	n := m.n()
-	s := Status{Shown: n, Total: len(m.msgs), Live: m.live, HideRetired: m.hideRetired}
-	if n == 0 {
-		return s
-	}
-	cur := m.msgs[n-1]
-	s.Span = cur.CreatedAt.Sub(m.msgs[0].CreatedAt)
-	s.Current = &Summary{From: cur.From, To: slices.Clone(cur.To), Subject: cur.Subject, State: stateName(cur), At: cur.CreatedAt}
-	return s
-}
-
-func stateName(x adapter.Message) string {
-	if x.Bounced {
-		return "bounced"
-	}
-	return x.State
+// retiredState is the panel's Retired group: departed or departing.
+func retiredState(a adapter.Agent) bool {
+	return a.Lifecycle.State == adapter.LifeDeparted || a.Lifecycle.State == adapter.LifeDeparting
 }
 
 func breathes(a adapter.Agent) bool { return a.Activity.State == "working" }
@@ -249,7 +225,7 @@ func (m *Model) cast() cast {
 	lead := m.lead()
 	var active, departed []adapter.Agent
 	for _, a := range m.st.Agents {
-		if a.Lifecycle.State == adapter.LifeDeparted {
+		if retiredState(a) {
 			departed = append(departed, a)
 		} else {
 			active = append(active, a)
@@ -309,13 +285,15 @@ func (m *Model) cast() cast {
 	return c
 }
 
-// lead is the crew's lead, or failing that the first orchestrator.
+// lead is the first member in the crew's lead role (a crew definition
+// names its lead by role), or failing that the first orchestrator.
 func (m *Model) lead() string {
+	role := "orchestrator"
 	if p := m.st.Panel; p != nil && p.Crew != nil && p.Crew.Lead != "" {
-		return p.Crew.Lead
+		role = p.Crew.Lead
 	}
 	for _, a := range m.st.Agents {
-		if a.Role == "orchestrator" {
+		if a.Role == role {
 			return a.Handle
 		}
 	}
@@ -373,7 +351,7 @@ func (m *Model) edges(c cast) (map[edgeKey]*edgeAgg, []edgeKey) {
 		}
 		a, ok1 := c.node(ob.OwedTo)
 		b, ok2 := c.node(ob.OwedBy)
-		if m.live && ok1 && ok2 && a != b {
+		if m.live() && ok1 && ok2 && a != b {
 			add(edgeKey{a, b}, 0, StyleObligation)
 		}
 	}
@@ -388,7 +366,12 @@ func (m *Model) edges(c cast) (map[edgeKey]*edgeAgg, []edgeKey) {
 }
 
 // pulseEdges are the drawn edges message x travels, one per recipient.
+// A message with a hidden end is left out whole, as the panel's replay
+// list leaves it out.
 func (m *Model) pulseEdges(c cast, x adapter.Message) []edgeKey {
+	if c.hidden[x.From] || slices.ContainsFunc(x.To, func(h string) bool { return c.hidden[h] }) {
+		return nil
+	}
 	a, ok := c.node(x.From)
 	if !ok {
 		return nil
@@ -422,14 +405,16 @@ func boolInt(b bool) int {
 	return 0
 }
 
+// compareTimes orders departure times, a nil one (still departing) after
+// every recorded one.
 func compareTimes(a, b *time.Time) int {
 	switch {
 	case a == nil && b == nil:
 		return 0
 	case a == nil:
-		return -1
-	case b == nil:
 		return 1
+	case b == nil:
+		return -1
 	}
 	return a.Compare(*b)
 }

@@ -16,27 +16,6 @@ type Size struct {
 	Cell       raster.Metrics
 }
 
-// Status is what the replay bar says.
-type Status struct {
-	Shown, Total int
-	Live         bool
-	HideRetired  bool
-	// Span is the time from the first message to the last one shown.
-	Span time.Duration
-	// Current is the last message shown; nil when none is.
-	Current *Summary
-}
-
-// Summary is one message as the replay bar names it.
-type Summary struct {
-	From    string
-	To      []string
-	Subject string
-	// State is drained, queued, sent, bounced, or dead_lettered.
-	State string
-	At    time.Time
-}
-
 type NodeKind int
 
 const (
@@ -89,34 +68,25 @@ type Scene struct {
 	Nodes  []Node
 	Edges  []Edge
 	Pulses []Pulse
-	Status Status
-	// Graph is the area the nodes are placed in, between the replay bar
-	// and the legend.
+	// Graph is the area the nodes are placed in: the region less a margin.
 	Graph raster.Rect
 }
 
 // Pixels is the region's size in pixels.
 func (sz Size) Pixels() (w, h int) { return sz.Cols * sz.Cell.CellW, sz.Rows * sz.Cell.CellH }
 
-// Bands of the frame, in cells: the replay bar on top, the legend and the
-// current message's summary below.
-const (
-	topBand    = 1.6
-	bottomBand = 2.7
-)
-
 // Scene places the model at sz: nodes around an ellipse filling the graph
 // area (the lead at the top, then clockwise), edges as curves that bow
 // toward the center in a lane of their own per direction, each clipped to
 // the gap between the two badges. All geometry scales from the cell size.
 func (m *Model) Scene(sz Size) Scene {
-	s := Scene{Size: sz, Status: m.Status()}
+	s := Scene{Size: sz}
 	if !sz.Cell.Valid() || sz.Cols <= 0 || sz.Rows <= 0 {
 		return s
 	}
 	cw, ch := float64(sz.Cell.CellW), float64(sz.Cell.CellH)
 	w, h := sz.Pixels()
-	s.Graph = raster.Rect{Min: raster.Point{X: cw, Y: topBand * ch}, Max: raster.Point{X: float64(w) - cw, Y: float64(h) - bottomBand*ch}}
+	s.Graph = raster.Rect{Min: raster.Point{X: cw, Y: ch * 0.3}, Max: raster.Point{X: float64(w) - cw, Y: float64(h) - ch*0.3}}
 	if !m.ready {
 		return s
 	}

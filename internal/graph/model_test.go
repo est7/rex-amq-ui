@@ -136,13 +136,14 @@ func TestSceneSixActiveAndFold(t *testing.T) {
 }
 
 func TestSceneLeadFromCrew(t *testing.T) {
-	agents := []adapter.Agent{agent("b", "implementer", "idle"), agent("lead", "reviewer", "idle"), agent("o", "orchestrator", "idle")}
+	// A crew definition names its lead by role.
+	agents := []adapter.Agent{agent("a", "implementer", "idle"), agent("b", "reviewer", "idle"), agent("o", "orchestrator", "idle")}
 	st := state(agents, nil)
-	st.Panel.Crew = &adapter.Crew{Crew: "c", Lead: "lead"}
+	st.Panel.Crew = &adapter.Crew{Crew: "c", Lead: "reviewer"}
 	m, _ := newModel()
 	m.Update(st)
-	if got := nodeIDs(m.Scene(board)); got[0] != "lead" {
-		t.Errorf("nodes %v: the crew lead goes first", got)
+	if got := nodeIDs(m.Scene(board)); got[0] != "b" {
+		t.Errorf("nodes %v: the member whose role is the crew's lead goes first", got)
 	}
 }
 
@@ -215,37 +216,44 @@ func TestSceneObligationWithoutOpenerInLiveOnly(t *testing.T) {
 	if e.Style != graph.StyleObligation || e.Count != 0 {
 		t.Errorf("o->i %+v, want an obligation edge (owed_to -> owed_by, the opener's direction) with no messages", e)
 	}
-	m.Prev()
+	m.Show("m1", false)
 	if _, ok := edge(m.Scene(board), "o", "i"); ok {
 		t.Errorf("replay shows an obligation whose opener it cannot place in time")
 	}
 }
 
 func TestSceneHideRetired(t *testing.T) {
+	leaving := agent("bye", "writer", "idle")
+	leaving.Lifecycle.State = adapter.LifeDeparting
 	agents := []adapter.Agent{
-		agent("o", "orchestrator", "idle"), agent("i", "implementer", "idle"),
+		agent("o", "orchestrator", "idle"), agent("i", "implementer", "idle"), leaving,
 		retired("old1", "implementer", t0.Add(1*time.Minute)), retired("old2", "reviewer", t0.Add(3*time.Minute)), retired("old3", "writer", t0.Add(2*time.Minute)),
 	}
-	msgs := []adapter.Message{msg("m1", 1, "o", to("old1"), adapter.MsgDrained), msg("m2", 2, "old2", to("o"), adapter.MsgDrained), msg("m3", 3, "o", to("i"), adapter.MsgDrained)}
+	msgs := []adapter.Message{
+		msg("m1", 1, "o", to("old1"), adapter.MsgDrained), msg("m2", 2, "old2", to("o"), adapter.MsgDrained), msg("m3", 3, "o", to("i"), adapter.MsgDrained),
+		msg("m4", 4, "o", to("i", "old2"), adapter.MsgDrained),
+	}
 	m, _ := newModel()
 	m.Update(state(agents, msgs))
 	s := m.Scene(board)
-	if got, want := nodeIDs(s), []string{"o", "i", "old2", "old3", "+1"}; !slices.Equal(got, want) {
-		t.Fatalf("nodes %v, want %v: the two latest retired shown, the oldest folded", got, want)
+	if got, want := nodeIDs(s), []string{"o", "i", "bye", "old2", "+2"}; !slices.Equal(got, want) {
+		t.Fatalf("nodes %v, want %v: departing counts as retired; the two latest retired shown, the rest folded", got, want)
 	}
 	if n := node(t, s, "old2"); n.Kind != graph.KindRetired {
 		t.Errorf("old2 kind %v, want KindRetired", n.Kind)
 	}
-	m.ToggleHideRetired()
+	if n := node(t, s, "bye"); n.Kind != graph.KindRetired {
+		t.Errorf("departing bye kind %v, want KindRetired", n.Kind)
+	}
+	m.Show("", true)
 	s = m.Scene(board)
 	if got, want := nodeIDs(s), []string{"o", "i"}; !slices.Equal(got, want) {
 		t.Fatalf("hidden retired: nodes %v, want %v", got, want)
 	}
-	if got := edgeNames(s); len(got) != 1 {
-		t.Errorf("hidden retired: edges %v, want only o->i", got)
-	}
-	if !m.Status().HideRetired {
-		t.Errorf("status does not report Hide retired")
+	// Like the panel's replay list, a message with any retired end is left
+	// out whole: m4 to i and old2 does not count on o->i.
+	if e := mustEdge(t, s, "o", "i"); e.Count != 1 || len(s.Edges) != 1 {
+		t.Errorf("hidden retired: edges %v, want only o->i x1", edgeNames(s))
 	}
 }
 
@@ -260,75 +268,37 @@ func TestReplayCursor(t *testing.T) {
 	}
 	m, _ := newModel()
 	m.Update(state(agents, msgs))
-	st := m.Status()
-	if !st.Live || st.Shown != 4 || st.Total != 4 || st.Span != 30*time.Minute || st.Current == nil || st.Current.Subject != "subject z" {
-		t.Fatalf("live status %+v, want 4/4 live, span 30m, current z", st)
+	if e := mustEdge(t, m.Scene(board), "i", "o"); e.Count != 2 || e.Style != graph.StyleQueued {
+		t.Fatalf("live i->o %+v, want x and z (queued)", e)
 	}
-	m.Prev()
-	st = m.Status()
-	if st.Live || st.Shown != 3 || st.Current.Subject != "subject y" || st.Span != 20*time.Minute {
-		t.Fatalf("after Prev %+v, want 3/4 replay at y, span 20m", st)
+	m.Show("y", false)
+	if e := mustEdge(t, m.Scene(board), "i", "o"); e.Count != 1 || e.Style != graph.StyleDrained {
+		t.Errorf("at y, i->o %+v: z is after the cursor, x before it", e)
 	}
-	if _, ok := edge(m.Scene(board), "i", "o"); !ok {
-		t.Errorf("x (i->o) is before the cursor and must still show")
-	}
-	if e := mustEdge(t, m.Scene(board), "i", "o"); e.Style != graph.StyleDrained || e.Count != 1 {
-		t.Errorf("i->o at 3/4 %+v: z (queued) is after the cursor", e)
-	}
-	m.Prev()
-	m.Prev()
-	m.Prev()
-	if st = m.Status(); st.Shown != 1 || st.Current.Subject != "subject w" || st.Span != 0 {
-		t.Fatalf("Prev past the start %+v, want 1/4 at w", st)
-	}
+	m.Show("w", false)
 	if _, ok := edge(m.Scene(board), "i", "o"); ok {
-		t.Errorf("at 1/4 only w (o->i) shows")
+		t.Errorf("at w (the first in time) only o->i shows")
 	}
-	for range 5 {
-		m.Next()
+	// The cursor's message leaves the state: back to Live, no panic.
+	m.Update(state(agents, []adapter.Message{msgs[0], msgs[1], msgs[2]}))
+	if e := mustEdge(t, m.Scene(board), "i", "o"); e.Count != 2 {
+		t.Errorf("after the cursor's message left, i->o %+v, want Live (x and z)", e)
 	}
-	if st = m.Status(); st.Live || st.Shown != 4 {
-		t.Fatalf("Next to the end %+v, want 4/4 still in replay", st)
-	}
-	m.Update(state(agents, append(msgs, msg("v", 50, "o", to("i"), adapter.MsgQueued))))
-	if st = m.Status(); st.Live || st.Shown != 4 || st.Total != 5 {
-		t.Fatalf("mail during replay %+v, want 4/5: the cursor stays", st)
-	}
-	m.Live()
-	if st = m.Status(); !st.Live || st.Shown != 5 || st.Current.Subject != "subject v" {
-		t.Fatalf("Live %+v, want 5/5 live at v", st)
-	}
-	if st.Current.State != "queued" || st.Current.From != "o" || !slices.Equal(st.Current.To, []string{"i"}) || !st.Current.At.Equal(t0.Add(50*time.Minute)) {
-		t.Errorf("summary %+v", st.Current)
-	}
-}
-
-func TestReplaySummaryStates(t *testing.T) {
-	b := msg("b", 1, "o", to("i"), adapter.MsgQueued)
-	b.Bounced = true
-	for _, c := range []struct {
-		m    adapter.Message
-		want string
-	}{{b, "bounced"}, {msg("d", 1, "o", to("i"), adapter.MsgDeadLettered), "dead_lettered"}, {msg("s", 1, "o", to("i"), adapter.MsgSent), "sent"}} {
-		m, _ := newModel()
-		m.Update(state(nil, []adapter.Message{c.m}))
-		if got := m.Status().Current.State; got != c.want {
-			t.Errorf("summary state %q, want %q", got, c.want)
-		}
+	m.Show("gone", false)
+	if e := mustEdge(t, m.Scene(board), "i", "o"); e.Count != 2 {
+		t.Errorf("an unknown cursor %+v, want Live", e)
 	}
 }
 
 func TestReplayEmpty(t *testing.T) {
 	m, _ := newModel()
 	m.Update(state([]adapter.Agent{agent("o", "orchestrator", "idle")}, nil))
-	m.Prev()
-	m.Next()
-	st := m.Status()
-	if !st.Live || st.Shown != 0 || st.Total != 0 || st.Current != nil {
-		t.Errorf("empty status %+v, want 0/0 live with no current message", st)
-	}
+	m.Show("anything", false)
 	if s := m.Scene(board); len(s.Nodes) != 1 || len(s.Edges) != 0 {
 		t.Errorf("empty scene nodes %v edges %v", nodeIDs(s), edgeNames(s))
+	}
+	if m.NeedsAnimation() {
+		t.Errorf("an empty graph animates")
 	}
 }
 
@@ -362,7 +332,7 @@ func TestReplayAnimation(t *testing.T) {
 		t.Fatalf("pulse outlives its 1.2s")
 	}
 
-	m.Prev()
+	m.Show("m2", false)
 	if !m.NeedsAnimation() {
 		t.Errorf("a cursor step does not animate its message")
 	}
@@ -400,7 +370,7 @@ func TestReplayPulseHiddenEndpoint(t *testing.T) {
 	agents := []adapter.Agent{agent("o", "orchestrator", "idle"), retired("old", "implementer", t0)}
 	m, _ := newModel()
 	m.Update(state(agents, nil))
-	m.ToggleHideRetired()
+	m.Show("", true)
 	m.Update(state(agents, []adapter.Message{msg("m1", 1, "o", to("old"), adapter.MsgDrained)}))
 	if m.NeedsAnimation() {
 		t.Errorf("a pulse along a hidden edge animates")
@@ -439,5 +409,22 @@ func TestSceneObligationFollowsOpener(t *testing.T) {
 	}
 	if _, ok := edge(s, "i", "o"); ok {
 		t.Errorf("an i->o edge appears though no mail went that way")
+	}
+}
+
+func TestReplayLiveRevealsPulses(t *testing.T) {
+	agents := []adapter.Agent{agent("o", "orchestrator", "idle"), agent("i", "implementer", "idle")}
+	msgs := []adapter.Message{msg("m1", 1, "o", to("i"), adapter.MsgDrained), msg("m2", 2, "i", to("o"), adapter.MsgDrained), msg("m3", 3, "o", to("i"), adapter.MsgDrained)}
+	m, c := newModel()
+	m.Update(state(agents, msgs))
+	m.Show("m1", false)
+	c.Advance(2 * time.Second)
+	m.Show("m1", false)
+	if m.NeedsAnimation() {
+		t.Fatalf("showing the same cursor again pulses")
+	}
+	m.Show("", false)
+	if got := len(m.Scene(board).Pulses); got != 2 {
+		t.Errorf("back to Live pulses %d messages, want the 2 it reveals", got)
 	}
 }
