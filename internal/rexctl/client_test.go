@@ -437,3 +437,92 @@ func TestRexctlCallsDoNotWaitForABlockedWriter(t *testing.T) {
 		}
 	}
 }
+
+// emitAndRoundTrip sends one session event, then makes a call. The event
+// is written to the socket before the call's answer, so when the call
+// returns the client has read the event. The call is a block.method, which
+// does not wait behind a request the server is still running.
+func emitAndRoundTrip(t *testing.T, s *rexctltest.Server, c *rexctl.Client, payload map[string]any) error {
+	t.Helper()
+	s.Emit(session, "session_view_changed", payload)
+	_, err := c.TerminalSize(ctx(t), session, panel)
+	return err
+}
+
+// Events nobody reads queue up to the bound while responses keep coming;
+// one more ends the connection with ErrEventOverflow, failing the calls in
+// flight and closing the event channel.
+func TestRexctlEventQueueIsBounded(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	cx := ctx(t)
+	c, err := rexctl.DialWith(cx, s.URL, rexctl.Options{MaxQueuedEvents: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := c.Attach(cx, session); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	s.Handle("session.resize_layer", func(rexctltest.Request) (any, *rexctltest.Error) {
+		<-release
+		return map[string]any{"revision": 2}, nil
+	})
+	inFlight := make(chan error, 1)
+	go func() {
+		_, err := c.ResizeLayer(context.Background(), session, layer, rexctl.Bounds{0, 0, 1, 1})
+		inFlight <- err
+	}()
+	for i := range 8 {
+		if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": i + 2}); err != nil {
+			t.Fatalf("call after %d unread events: %v", i+1, err)
+		}
+	}
+	if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": 99}); !errors.Is(err, rexctl.ErrClosed) {
+		t.Fatalf("call after the bound: %v", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection did not end")
+	}
+	if err := c.Err(); !errors.Is(err, rexctl.ErrEventOverflow) || !errors.Is(err, rexctl.ErrClosed) {
+		t.Fatalf("Err %v", err)
+	}
+	if err := <-inFlight; !errors.Is(err, rexctl.ErrEventOverflow) {
+		t.Fatalf("call in flight: %v", err)
+	}
+	for timeout := time.After(5 * time.Second); ; {
+		select {
+		case _, ok := <-c.Events():
+			if !ok {
+				return
+			}
+		case <-timeout:
+			t.Fatal("events not closed")
+		}
+	}
+}
+
+func TestRexctlEventQueueByteBound(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	cx := ctx(t)
+	c, err := rexctl.DialWith(cx, s.URL, rexctl.Options{MaxQueuedBytes: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := c.Attach(cx, session); err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("p", 100)
+	for i := range 2 {
+		if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": i, "pad": pad}); err != nil {
+			t.Fatalf("event %d of about 120 bytes under a 300-byte bound: %v", i+1, err)
+		}
+	}
+	if err := emitAndRoundTrip(t, s, c, map[string]any{"revision": 3, "pad": pad}); !errors.Is(err, rexctl.ErrClosed) || !errors.Is(c.Err(), rexctl.ErrEventOverflow) {
+		t.Fatalf("third event: %v (%v)", err, c.Err())
+	}
+}

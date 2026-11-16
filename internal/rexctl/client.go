@@ -10,6 +10,7 @@ package rexctl
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,25 @@ var (
 	ErrNotWelcome    = errors.New("rexctl: server did not welcome the connection")
 	ErrClosed        = errors.New("rexctl: connection closed")
 	ErrRequestTooBig = errors.New("rexctl: request larger than the server accepts")
+	// ErrEventOverflow ends a connection whose events were not read in
+	// time (Options). Dial again, attach, and read a fresh view.
+	ErrEventOverflow = errors.New("rexctl: events not read in time")
+)
+
+// Options tune a connection; zero fields take the defaults.
+type Options struct {
+	// MaxQueuedEvents and MaxQueuedBytes bound the events read from the
+	// server and not yet taken from Events. Past either, the connection
+	// ends with ErrEventOverflow rather than grow without bound or stall
+	// the responses behind them.
+	MaxQueuedEvents int
+	MaxQueuedBytes  int
+}
+
+// Defaults for Options.
+const (
+	DefaultMaxQueuedEvents = 4096
+	DefaultMaxQueuedBytes  = 16 << 20
 )
 
 // Error codes Rex answers with.
@@ -100,6 +120,9 @@ type Client struct {
 	nextID  uint64
 	pending map[string]chan response
 	queue   []Event // events read and not yet taken from the channel
+	queued  int     // payload bytes in queue
+	maxQ    int     // Options.MaxQueuedEvents
+	maxQB   int     // Options.MaxQueuedBytes
 	wake    chan struct{}
 	err     error // why the connection ended; nil while open
 }
@@ -121,6 +144,11 @@ type response struct {
 // Dial connects to the server at serverURL (REX_SERVER, a unix:// URL),
 // exchanges hello and welcome, and starts reading.
 func Dial(ctx context.Context, serverURL string) (*Client, error) {
+	return DialWith(ctx, serverURL, Options{})
+}
+
+// DialWith is Dial with options.
+func DialWith(ctx context.Context, serverURL string, o Options) (*Client, error) {
 	path, err := SocketPath(serverURL)
 	if err != nil {
 		return nil, err
@@ -149,6 +177,7 @@ func Dial(ctx context.Context, serverURL string) (*Client, error) {
 	ws.SetReadLimit(int64(w.MaxMessageBytes))
 	rctx, stop := context.WithCancel(context.Background())
 	c := &Client{ws: ws, welcome: w, stop: stop, done: make(chan struct{}), events: make(chan Event), writes: make(chan writeJob),
+		maxQ: cmp.Or(max(o.MaxQueuedEvents, 0), DefaultMaxQueuedEvents), maxQB: cmp.Or(max(o.MaxQueuedBytes, 0), DefaultMaxQueuedBytes),
 		nextID: 1, pending: map[string]chan response{}, wake: make(chan struct{}, 1)}
 	go c.read(rctx)
 	go c.pump()
@@ -252,7 +281,9 @@ func (c *Client) read(ctx context.Context) {
 		}
 	}
 	c.mu.Lock()
-	c.err = fmt.Errorf("%w: %v", ErrClosed, cause)
+	c.err = fmt.Errorf("%w: %w", ErrClosed, cause)
+	clear(c.queue)
+	c.queue, c.queued = nil, 0
 	for id, ch := range c.pending {
 		ch <- response{err: nil, seq: -1}
 		delete(c.pending, id)
@@ -299,7 +330,13 @@ func (c *Client) dispatch(b []byte) error {
 			return err
 		}
 		c.mu.Lock()
+		if len(c.queue)+1 > c.maxQ || c.queued+len(e.Payload) > c.maxQB {
+			n, b := len(c.queue), c.queued
+			c.mu.Unlock()
+			return fmt.Errorf("%w: %d events (%d bytes) queued", ErrEventOverflow, n, b)
+		}
 		c.queue = append(c.queue, e)
+		c.queued += len(e.Payload)
 		c.mu.Unlock()
 		c.signal()
 	}
@@ -338,8 +375,9 @@ func (c *Client) signal() {
 }
 
 // pump moves queued events to the events channel, so a slow reader of
-// events never blocks the read loop (and with it every response). Once the
-// connection ends it closes the channel; events not taken by then are
+// events never blocks the read loop (and with it every response). An event
+// stays in the queue, and counts against its bound, until it is delivered.
+// Once the connection ends the channel closes; events not taken by then are
 // dropped, since a new connection has to attach and read a fresh view.
 func (c *Client) pump() {
 	defer close(c.events)
@@ -348,7 +386,7 @@ func (c *Client) pump() {
 		var e Event
 		have := len(c.queue) > 0
 		if have {
-			e, c.queue = c.queue[0], c.queue[1:]
+			e = c.queue[0]
 		}
 		c.mu.Unlock()
 		if !have {
@@ -364,6 +402,15 @@ func (c *Client) pump() {
 		case <-c.done:
 			return
 		}
+		c.mu.Lock()
+		// The read loop only appends and, once done, clears; the queue can
+		// be empty here only after that.
+		if len(c.queue) > 0 {
+			c.queued -= len(c.queue[0].Payload)
+			c.queue[0] = Event{}
+			c.queue = c.queue[1:]
+		}
+		c.mu.Unlock()
 	}
 }
 
