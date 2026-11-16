@@ -119,9 +119,11 @@ type Model struct {
 	retired bool // the Retired group is open
 
 	mail mailState
-	// graph is the replay cursor: -1 follows Live, else the index of the
-	// message shown.
-	graph       int
+	// graphAt is the replay cursor: the id of the message shown, "" for
+	// Live. It is an id, not an index, because the list under it changes
+	// (removals, snapshots, Hide retired); a cursor whose message left the
+	// list is Live.
+	graphAt     string
 	hideRetired bool
 }
 
@@ -138,7 +140,7 @@ func New(d Deps, o Options) Model {
 	if d.Clock == nil {
 		d.Clock = SystemClock{}
 	}
-	m := Model{deps: d, pal: theme.Default(), size: o.Size, sel: map[Tab]int{}, graph: -1,
+	m := Model{deps: d, pal: theme.Default(), size: o.Size, sel: map[Tab]int{},
 		mail: mailState{follow: true, expanded: map[string]bool{}}}
 	m.lay.Focused = o.Focused
 	m.lay.Size = o.Size
@@ -210,6 +212,9 @@ func (m *Model) settle() {
 	}
 	for _, t := range tabs {
 		m.sel[t] = clampSel(m.sel[t], m.rowCount(t))
+	}
+	if _, ok := m.replayIndex(); !ok {
+		m.graphAt = ""
 	}
 }
 

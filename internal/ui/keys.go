@@ -130,8 +130,8 @@ func (m *Model) stepBack() bool {
 			return true
 		}
 	case TabGraph:
-		if m.graph >= 0 {
-			m.graph = -1
+		if m.graphAt != "" {
+			m.graphAt = ""
 			return true
 		}
 	}
@@ -209,27 +209,31 @@ func (m Model) searchKey(k tea.KeyPressMsg) Model {
 }
 
 func (m *Model) graphKey(s string) {
-	total := len(m.graphMessages())
+	msgs := m.graphMessages()
+	i, replaying := m.replayIndex()
+	if !replaying {
+		i = len(msgs) - 1
+	}
 	switch s {
 	case "[":
-		if m.graph < 0 {
-			m.graph = total - 1
+		if len(msgs) > 0 {
+			m.graphAt = msgs[max(i-1, 0)].ID
 		}
-		m.graph = max(m.graph-1, 0)
 	case "]":
-		if m.graph >= 0 {
-			m.graph++
-			if m.graph >= total-1 {
-				m.graph = -1
+		if replaying {
+			if i+1 >= len(msgs)-1 {
+				m.graphAt = ""
+			} else {
+				m.graphAt = msgs[i+1].ID
 			}
 		}
 	case "L":
-		m.graph = -1
+		m.graphAt = ""
 	case "h":
 		m.hideRetired = !m.hideRetired
-	}
-	if total == 0 {
-		m.graph = -1
+		if _, ok := m.replayIndex(); !ok {
+			m.graphAt = ""
+		}
 	}
 }
 

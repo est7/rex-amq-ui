@@ -361,12 +361,12 @@ func (m Model) GraphRegion() Rect {
 func (m Model) graphView(c *canvas) {
 	p := m.pal
 	msgs := m.graphMessages()
-	n := len(msgs)
-	if m.graph >= 0 {
-		n = m.graph + 1
+	at, replaying := m.replayIndex()
+	if !replaying {
+		at = len(msgs) - 1
 	}
 	live := capsule("● Live", p.Faint, p.Surface)
-	if m.graph < 0 {
+	if !replaying {
 		live = capsule("● Live", p.Green, p.GreenBg)
 	}
 	hide := "○"
@@ -379,18 +379,15 @@ func (m Model) graphView(c *canvas) {
 	}
 	c.addLR(p.Surface,
 		[]Span{{Text: " |<  <  >  ", Fg: p.Fg, Bold: true}, live, {Text: "  Hide retired " + hide, Fg: p.Muted}},
-		[]Span{{Text: fmt.Sprintf("%d / %d messages%s ", n, len(msgs), span), Fg: p.Muted}})
+		[]Span{{Text: fmt.Sprintf("%d / %d messages%s ", at+1, len(msgs), span), Fg: p.Muted}})
 	for range m.GraphRegion().H {
 		c.blank()
 	}
 	c.add(Span{Text: " ──", Fg: p.Green}, Span{Text: " drained  ", Fg: p.Muted},
 		Span{Text: "━━", Fg: p.Yellow, Bold: true}, Span{Text: " obligation  ", Fg: p.Muted},
 		Span{Text: "┄┄", Fg: p.Faint}, Span{Text: " queued · bounced", Fg: p.Muted})
-	if len(msgs) > 0 {
-		cur := msgs[len(msgs)-1]
-		if m.graph >= 0 {
-			cur = msgs[m.graph]
-		}
+	if at >= 0 {
+		cur := msgs[at]
 		c.add(Span{Text: " " + cur.From + " → " + recipients(cur), Fg: p.Fg}, Span{Text: " · " + cur.Subject, Fg: p.Muted})
 	}
 }

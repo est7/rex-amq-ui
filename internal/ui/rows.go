@@ -296,3 +296,17 @@ func (m Model) rowCount(t Tab) int {
 	}
 	return 0
 }
+
+// replayIndex is where the replay cursor is in graphMessages; false when it
+// follows Live or its message is no longer listed.
+func (m Model) replayIndex() (int, bool) {
+	if m.graphAt == "" {
+		return 0, false
+	}
+	for i, msg := range m.graphMessages() {
+		if msg.ID == m.graphAt {
+			return i, true
+		}
+	}
+	return 0, false
+}
