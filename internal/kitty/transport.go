@@ -44,44 +44,66 @@ type Transport struct {
 	seq uint64
 	// shown is the image id on screen: 1 or 2, 0 when none is.
 	shown int
+	// unsure: a write was cut short after some of a frame's commands went
+	// out, so an image may be up that shown does not name. Only a Clear
+	// that succeeds settles it.
+	unsure bool
 	// unread are the frame files sent and not yet read (deleted) by the
 	// terminal, oldest first.
 	unread []string
+	// writeFile and remove are the file system (tests fail them).
+	writeFile func(string, []byte, os.FileMode) error
+	remove    func(string) error
 }
 
 // NewTransport sends frames through files in dir (DefaultDir in
 // production, a test's temp dir in tests) named for process pid.
 func NewTransport(dir string, pid int) *Transport {
-	return &Transport{dir: dir, pid: pid}
+	return &Transport{dir: dir, pid: pid, writeFile: os.WriteFile, remove: os.Remove}
 }
 
 func (t *Transport) prefix() string {
 	return "tty-graphics-protocol-rex-amq-ui-" + strconv.Itoa(t.pid) + "-"
 }
 
-// Shown reports whether an image of this transport may be on screen.
-func (t *Transport) Shown() bool { return t.shown != 0 }
+// Shown reports whether an image of this transport may be on screen, a
+// Clear owed.
+func (t *Transport) Shown() bool { return t.shown != 0 || t.unsure }
+
+// Room reports whether a frame would be taken now: fewer than MaxUnread
+// files wait for the terminal. A caller checks it before painting.
+func (t *Transport) Room() bool {
+	t.forgetRead()
+	return len(t.unread) < MaxUnread
+}
 
 // Show writes img to a new frame file and writes to w, in one Write, the
 // commands that show it with its top-left corner at cell at: save the
 // cursor, move to at, transmit and place the image under the id not on
 // screen, restore the cursor, then delete the image that was on screen.
 // It refuses with ErrBacklog while MaxUnread files wait for the terminal.
-// On any error nothing is shown, the file is gone, and the image on screen
-// stays.
+// A write that fails before any byte went out changes nothing and removes
+// the file. One cut short after some bytes (or short with no error, which
+// is io.ErrShortWrite) may have placed the image: the file stays for the
+// terminal to read, counted, and Shown stays true until a Clear succeeds.
 func (t *Transport) Show(w io.Writer, img *image.RGBA, at Cell) error {
 	iw, ih := img.Rect.Dx(), img.Rect.Dy()
 	if iw <= 0 || ih <= 0 {
 		return fmt.Errorf("kitty: empty %dx%d frame", iw, ih)
 	}
-	t.forgetRead()
-	if len(t.unread) >= MaxUnread {
+	if !t.Room() {
 		return ErrBacklog
 	}
 	t.seq++
 	path := filepath.Join(t.dir, t.prefix()+strconv.FormatUint(t.seq, 10)+".rgba")
-	if err := os.WriteFile(path, packed(img), 0o600); err != nil {
-		return fmt.Errorf("kitty: frame file: %w", err)
+	if err := t.writeFile(path, packed(img), 0o600); err != nil {
+		// The file may exist, half written. One that cannot be removed
+		// counts against the budget like an unread frame.
+		rerr := t.removeFile(path)
+		if rerr != nil {
+			t.unread = append(t.unread, path)
+		}
+		return errors.Join(fmt.Errorf("kitty: frame file: %w", err), rerr)
 	}
 	id := 1
 	if t.shown == 1 {
@@ -92,8 +114,17 @@ func (t *Transport) Show(w io.Writer, img *image.RGBA, at Cell) error {
 	if t.shown != 0 {
 		out = fmt.Appendf(out, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", t.shown)
 	}
-	if _, err := w.Write(out); err != nil {
-		return errors.Join(fmt.Errorf("kitty: write: %w", err), removeFile(path))
+	n, err := w.Write(out)
+	if err == nil && n < len(out) {
+		err = io.ErrShortWrite
+	}
+	switch {
+	case err != nil && n <= 0:
+		return errors.Join(fmt.Errorf("kitty: write: %w", err), t.removeFile(path))
+	case err != nil:
+		t.unsure = true
+		t.unread = append(t.unread, path)
+		return fmt.Errorf("kitty: write cut short after %d of %d bytes: %w", n, len(out), err)
 	}
 	t.shown = id
 	t.unread = append(t.unread, path)
@@ -103,10 +134,15 @@ func (t *Transport) Show(w io.Writer, img *image.RGBA, at Cell) error {
 // Clear writes to w the command that deletes every image this terminal
 // shows (leaving the Graph tab, pausing, minimizing).
 func (t *Transport) Clear(w io.Writer) error {
-	if _, err := io.WriteString(w, "\x1b_Ga=d,d=A,q=2\x1b\\"); err != nil {
+	const clearAll = "\x1b_Ga=d,d=A,q=2\x1b\\"
+	n, err := io.WriteString(w, clearAll)
+	if err == nil && n < len(clearAll) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		return fmt.Errorf("kitty: write: %w", err)
 	}
-	t.shown = 0
+	t.shown, t.unsure = 0, false
 	return nil
 }
 
@@ -120,7 +156,7 @@ func (t *Transport) Cleanup() error {
 	}
 	var errs []error
 	for _, f := range files {
-		errs = append(errs, removeFile(f))
+		errs = append(errs, t.removeFile(f))
 	}
 	return errors.Join(errs...)
 }
@@ -136,8 +172,8 @@ func (t *Transport) forgetRead() {
 	t.unread = kept
 }
 
-func removeFile(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+func (t *Transport) removeFile(path string) error {
+	if err := t.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

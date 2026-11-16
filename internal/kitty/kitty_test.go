@@ -374,3 +374,94 @@ func TestSchedulerStaleTickAfterStop(t *testing.T) {
 		t.Errorf("the new loop's tick did not render")
 	}
 }
+
+// cutTerm takes the first cut bytes of a write and fails the rest, the
+// way a terminal connection can die mid-command; short returns no error.
+type cutTerm struct {
+	cut   func([]byte) int
+	short bool
+	got   bytes.Buffer
+}
+
+func (c *cutTerm) Write(p []byte) (int, error) {
+	n := min(c.cut(p), len(p))
+	c.got.Write(p[:n])
+	if n == len(p) {
+		return n, nil
+	}
+	if c.short {
+		return n, nil
+	}
+	return n, io.ErrUnexpectedEOF
+}
+
+// afterTransmit cuts a frame's commands right after the a=T command's
+// string terminator: the terminal has the image, not the cursor restore.
+func afterTransmit(p []byte) int {
+	if i := bytes.Index(p, []byte("\x1b\\\x1b8")); i >= 0 {
+		return i + 2
+	}
+	return len(p)
+}
+
+func TestKittyGraphPartialWriteKeepsCleanupOwed(t *testing.T) {
+	for _, short := range []bool{false, true} {
+		dir := t.TempDir()
+		tr := kitty.NewTransport(dir, pid)
+		term := &cutTerm{cut: afterTransmit, short: short}
+		err := tr.Show(term, frame(2, 2, 0), kitty.Cell{})
+		if err == nil {
+			t.Fatalf("short=%v: a frame cut after its transmit reported success", short)
+		}
+		if short && !errors.Is(err, io.ErrShortWrite) {
+			t.Errorf("a short write without an error: %v, want io.ErrShortWrite", err)
+		}
+		if !strings.Contains(term.got.String(), "a=T") || !tr.Shown() {
+			t.Errorf("short=%v: the image reached the terminal but Shown is %v: nobody would clear it", short, tr.Shown())
+		}
+		if files, _ := filepath.Glob(filepath.Join(dir, "*.rgba")); len(files) != 1 {
+			t.Errorf("short=%v: the possibly transmitted frame's file was removed (%v): the terminal may still read it", short, files)
+		}
+		var b bytes.Buffer
+		if err := tr.Clear(&b); err != nil || tr.Shown() {
+			t.Errorf("Clear after a partial frame: %v, Shown %v", err, tr.Shown())
+		}
+	}
+	// A cut Clear owes the clear still.
+	tr := kitty.NewTransport(t.TempDir(), pid)
+	read(t, show(t, tr, frame(2, 2, 0), kitty.Cell{}))
+	if err := tr.Clear(&cutTerm{cut: func(p []byte) int { return 3 }}); err == nil || !tr.Shown() {
+		t.Errorf("a Clear cut short: err %v, Shown %v; want the error and the clear still owed", err, tr.Shown())
+	}
+}
+
+func TestKittyGraphFailedFileWriteBounded(t *testing.T) {
+	dir := t.TempDir()
+	tr := kitty.NewTransport(dir, pid)
+	// The file is created, then writing it fails (a full disk, a size
+	// limit).
+	createThenFail := func(name string, _ []byte, mode os.FileMode) error {
+		if err := os.WriteFile(name, []byte("partial"), mode); err != nil {
+			return err
+		}
+		return errors.New("disk full")
+	}
+	kitty.SetFiles(tr, createThenFail, os.Remove)
+	for range 20 {
+		if err := tr.Show(io.Discard, frame(2, 2, 0), kitty.Cell{}); err == nil {
+			t.Fatal("a failed frame file reported success")
+		}
+	}
+	if files, _ := filepath.Glob(filepath.Join(dir, "*.rgba")); len(files) != 0 {
+		t.Errorf("20 failed frame files left %d behind", len(files))
+	}
+	// When the half-written file cannot be removed either, it counts
+	// against the budget.
+	kitty.SetFiles(tr, createThenFail, func(string) error { return errors.New("read-only") })
+	for range 20 {
+		tr.Show(io.Discard, frame(2, 2, 0), kitty.Cell{})
+	}
+	if files, _ := filepath.Glob(filepath.Join(dir, "*.rgba")); len(files) > kitty.MaxUnread {
+		t.Errorf("%d undeletable failed frame files, want at most %d", len(files), kitty.MaxUnread)
+	}
+}
