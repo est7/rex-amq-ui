@@ -206,11 +206,21 @@ func (p *Panel) OpenBeside(ctx context.Context, anchor, label string, argv []str
 		return err
 	}
 	if _, err := c.MoveBlock(ctx, rexctl.MoveBlock{SessionID: p.session, BlockID: made.BlockID, AnchorBlockID: anchor, Side: "before"}); err != nil {
+		// A block that is never placed runs detached, unseen: close it,
+		// even when the caller's context is what ended the placement.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		if cerr := c.Call(cctx, "block.close", map[string]any{"session_id": p.session, "block_id": made.BlockID}, nil); cerr != nil {
+			return errors.Join(err, fmt.Errorf("layer: close unplaced block %s: %w", made.BlockID, cerr))
+		}
 		return err
 	}
 	_, err = c.DisownBlock(ctx, p.session, made.BlockID)
 	return err
 }
+
+// cleanupTimeout bounds closing a block an operation left behind.
+const cleanupTimeout = 5 * time.Second
 
 // Redial bounds the wait between reconnects.
 const (

@@ -132,7 +132,7 @@ func testReader(t *testing.T) {
 			wf.Close()
 		}()
 		var all bytes.Buffer
-		buf := make([]byte, 2)
+		buf := make([]byte, MinRead)
 		for {
 			n, err := r.Read(buf)
 			all.Write(buf[:n])
@@ -148,7 +148,7 @@ func testReader(t *testing.T) {
 		rf, wf := pipe(t)
 		r := NewReader(rf) // polls the pipe
 		wf.Write([]byte("\x1b"))
-		buf := make([]byte, 8)
+		buf := make([]byte, MinRead)
 		start := time.Now()
 		n, err := r.Read(buf)
 		if err != nil || string(buf[:n]) != "\x1b" {
@@ -170,7 +170,7 @@ func testReader(t *testing.T) {
 			return true
 		}
 		wf.Write([]byte("z\x1b"))
-		buf := make([]byte, 8)
+		buf := make([]byte, MinRead)
 		n, _ := r.Read(buf)
 		if string(buf[:n]) != "z" || waited != 1 || !reflect.DeepEqual(got, []Command{{Verb: Zoom}}) {
 			t.Fatalf("read %q waited %d cmds %v", buf[:n], waited, got)

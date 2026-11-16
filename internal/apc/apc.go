@@ -139,6 +139,16 @@ func (p *Parser) Feed(in []byte) (out []byte, cmds []Command) {
 	return out, cmds
 }
 
+// Held is how many bytes the parser holds back; Feed and Flush return at
+// most this many bytes beyond their input.
+func (p *Parser) Held() int {
+	n := len(p.buf)
+	if p.st == payEsc {
+		n++ // the ESC that may end the sequence
+	}
+	return n
+}
+
 // HoldsEsc reports whether the stream so far ends in a lone ESC: the Esc key,
 // or the first byte of a sequence whose rest has not arrived.
 func (p *Parser) HoldsEsc() bool { return p.st == esc }

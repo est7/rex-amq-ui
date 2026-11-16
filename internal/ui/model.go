@@ -106,22 +106,34 @@ type Model struct {
 	askedOwner string
 	answered   bool
 
-	w, h    int
-	tab     Tab
-	tabSet  bool // the human or a command chose the tab
-	size    layer.Size
-	paused  bool
-	frozen  string // the frame on screen while paused
+	w, h   int
+	tab    Tab
+	tabSet bool // the human or a command chose the tab
+	size   layer.Size
+	paused bool
+	frozen string // the frame on screen while paused
+	// sizeHeld: a resize came while paused; Update passes it on to the
+	// renderer on resume.
+	sizeHeld bool
+	// shown counts pauses and resumes. An action that leaves the panel
+	// records it when it starts and pauses the panel on success only if no
+	// pause or resume came in between: actions finish asynchronously, and
+	// one that ends after the panel came back must not hide it again.
+	shown   int
 	hint    string
 	hintBad bool
 
 	sel     map[Tab]int
 	retired bool // the Retired group is open
+	// owed is when each open obligation was first seen (owedSince).
+	owed map[string]time.Time
 
 	mail mailState
-	// graph is the replay cursor: -1 follows Live, else the index of the
-	// message shown.
-	graph       int
+	// graphAt is the replay cursor: the id of the message shown, "" for
+	// Live. It is an id, not an index, because the list under it changes
+	// (removals, snapshots, Hide retired); a cursor whose message left the
+	// list is Live.
+	graphAt     string
 	hideRetired bool
 }
 
@@ -138,7 +150,7 @@ func New(d Deps, o Options) Model {
 	if d.Clock == nil {
 		d.Clock = SystemClock{}
 	}
-	m := Model{deps: d, pal: theme.Default(), size: o.Size, sel: map[Tab]int{}, graph: -1,
+	m := Model{deps: d, pal: theme.Default(), size: o.Size, sel: map[Tab]int{},
 		mail: mailState{follow: true, expanded: map[string]bool{}}}
 	m.lay.Focused = o.Focused
 	m.lay.Size = o.Size
@@ -156,13 +168,45 @@ type actionDone struct {
 	what string
 	// leaves: the call minimized the panel on success.
 	leaves bool
-	size   *layer.Size
-	err    error
+	// shown is Model.shown when the call started.
+	shown int
+	size  *layer.Size
+	err   error
+}
+
+// heldSize is a terminal resize that arrived while the panel was paused
+// (Filter). The renderer must not see it then: it would repaint.
+type heldSize tea.WindowSizeMsg
+
+// Filter is the program's message filter (tea.WithFilter): while the panel
+// is paused it keeps resizes from the renderer, which repaints on every
+// one, and hands them to the model, which passes the size on when it
+// resumes.
+func Filter(model tea.Model, msg tea.Msg) tea.Msg {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		if m, ok := model.(Model); ok && m.paused {
+			return heldSize(size)
+		}
+	}
+	return msg
 }
 
 // Update folds msg into the model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	n := next.(Model)
+	if n.sizeHeld && !n.paused {
+		n.sizeHeld = false
+		size := tea.WindowSizeMsg{Width: n.w, Height: n.h}
+		cmd = tea.Batch(cmd, func() tea.Msg { return size })
+	}
+	return n, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case heldSize:
+		m.w, m.h, m.sizeHeld = msg.Width, msg.Height, true
 	case adapter.FrameUpdate:
 		m.st = m.st.Apply(msg.Frame)
 		m.settle()
@@ -198,6 +242,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // settle keeps the tab and selections valid after the state changed.
 func (m *Model) settle() {
+	m.trackOwed()
 	tabs := m.tabs()
 	if !m.tabSet && m.st.Ready() && m.personal() {
 		m.tab, m.tabSet = TabEpics, true
@@ -210,6 +255,9 @@ func (m *Model) settle() {
 	}
 	for _, t := range tabs {
 		m.sel[t] = clampSel(m.sel[t], m.rowCount(t))
+	}
+	if _, ok := m.replayIndex(); !ok {
+		m.graphAt = ""
 	}
 }
 
@@ -288,10 +336,16 @@ func (m *Model) pause() {
 	if !m.paused {
 		m.frozen = m.render()
 		m.paused = true
+		m.shown++
 	}
 }
 
-func (m *Model) resume() { m.paused, m.frozen = false, "" }
+func (m *Model) resume() {
+	if m.paused {
+		m.paused, m.frozen = false, ""
+		m.shown++
+	}
+}
 
 // Paused reports whether the panel has stopped drawing.
 func (m Model) Paused() bool { return m.paused }
@@ -301,11 +355,11 @@ func (m Model) act(what string, leaves bool, f func(context.Context, Controller)
 	if m.deps.Layer == nil {
 		return func() tea.Msg { return actionDone{what: what, err: layer.ErrDisconnected} }
 	}
-	ctl := m.deps.Layer
+	ctl, shown := m.deps.Layer, m.shown
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return actionDone{what: what, leaves: leaves, err: f(ctx, ctl)}
+		return actionDone{what: what, leaves: leaves, shown: shown, err: f(ctx, ctl)}
 	}
 }
 
@@ -332,7 +386,7 @@ func (m Model) done(d actionDone) (tea.Model, tea.Cmd) {
 	if d.size != nil {
 		m.size = *d.size
 	}
-	if d.leaves {
+	if d.leaves && d.shown == m.shown {
 		m.pause()
 	}
 	return m, nil

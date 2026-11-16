@@ -103,6 +103,10 @@ func sgr(s string, bg *bool) (int, error) {
 				*bg = true
 			}
 			i += skip
+		case p == 7:
+			// Reverse video paints the background with the foreground,
+			// default included; the painter never uses it.
+			return 0, fmt.Errorf("SGR %q: reverse video is not modelled", body)
 		case p >= 1 && p <= 9, p >= 21 && p <= 29, p >= 30 && p <= 37, p == 39, p == 59, p >= 90 && p <= 97:
 		default:
 			return 0, fmt.Errorf("SGR %q: unmodelled parameter %d", body, p)
@@ -111,15 +115,24 @@ func sgr(s string, bg *bool) (int, error) {
 	return n, nil
 }
 
-// extended is how many parameters follow 38, 48, or 58: 5;n or 2;r;g;b.
+// extended is how many parameters follow 38, 48, or 58: 5;n or 2;r;g;b,
+// each in 0..255.
 func extended(rest []string) (int, error) {
-	if len(rest) >= 2 && rest[0] == "5" {
-		return 2, nil
+	n := 0
+	switch {
+	case len(rest) >= 2 && rest[0] == "5":
+		n = 2
+	case len(rest) >= 4 && rest[0] == "2":
+		n = 4
+	default:
+		return 0, fmt.Errorf("truncated extended colour %v", rest)
 	}
-	if len(rest) >= 4 && rest[0] == "2" {
-		return 4, nil
+	for _, a := range rest[1:n] {
+		if v, err := strconv.Atoi(a); err != nil || v < 0 || v > 255 {
+			return 0, fmt.Errorf("extended colour argument %q", a)
+		}
 	}
-	return 0, fmt.Errorf("truncated extended colour %v", rest)
+	return n, nil
 }
 
 const bgOn = "\x1b[48;2;45;53;59m"
@@ -150,6 +163,10 @@ func TestPaintNoHolesDetectsHoles(t *testing.T) {
 		"OSC":                    {bgOn + "\x1b]8;;x\x1b\\abcde\x1b[m", 5, 1},
 		"raw tab":                {bgOn + "ab\tcd\x1b[m", 5, 1},
 		"too many lines":         {good + "\n" + good + "\n" + good, 5, 2},
+		"reverse video":          {bgOn + "\x1b[7mabcde\x1b[m", 5, 1},
+		"truncated colour":       {"\x1b[48;2;1;2mabcde\x1b[m", 5, 1},
+		"colour out of range":    {"\x1b[48;2;1;2;256mabcde\x1b[m", 5, 1},
+		"256-colour index range": {"\x1b[48;5;300mabcde\x1b[m", 5, 1},
 	}
 	for name, c := range planted {
 		if p := holes(c.frame, c.w, c.h); len(p) == 0 {

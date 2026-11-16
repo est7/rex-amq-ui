@@ -19,17 +19,27 @@ type entry struct {
 	row         int
 }
 
-// list draws entries into c, scrolled so the selected row's first line
-// shows.
+// list draws entries into c, scrolled to show the selected row: centred
+// when it can be, its last line kept on screen, and its first line always.
 func list(c *canvas, es []entry, sel int) {
-	first := 0
+	first, last := -1, -1
 	for i, e := range es {
 		if e.row == sel {
-			first = i
-			break
+			if first < 0 {
+				first = i
+			}
+			last = i
 		}
 	}
-	for _, e := range es[scroll(first, c.left(), len(es)):] {
+	n, start := c.left(), 0
+	if first >= 0 && len(es) > n {
+		start = max(first-n/2, 0)
+		if last >= start+n {
+			start = last - n + 1
+		}
+		start = min(start, first, len(es)-n)
+	}
+	for _, e := range es[start:] {
 		if c.full() {
 			return
 		}
@@ -50,36 +60,67 @@ func capsule(text string, fg, bg color.Color) Span {
 	return Span{Text: " " + text + " ", Fg: fg, Bg: bg}
 }
 
-func (m Model) overview(c *canvas) {
+// overview lists the alerts, one row each, then the narrator, the
+// lifecycle, and the hand-back, a row per section, so j/k and G scroll
+// through all of it.
+func (m Model) overview(c *canvas) { list(c, m.overviewEntries(), m.sel[TabOverview]) }
+
+// overviewSections are the rows below the alerts: narrator, then the
+// lifecycle and hand-back when the view has them.
+func (m Model) overviewSections() int {
+	n := 1
+	if v := m.view(); v != nil {
+		if v.Lifecycle != nil {
+			n++
+		}
+		if v.HandBack != nil {
+			n++
+		}
+	}
+	return n
+}
+
+func (m Model) view() *adapter.SessionView {
+	if m.st.Panel == nil {
+		return nil
+	}
+	return m.st.Panel.View
+}
+
+func (m Model) overviewEntries() []entry {
 	p, now := m.pal, m.now()
-	if as := m.alerts(); len(as) > 0 {
-		section(c, fmt.Sprintf("SYSTEM ALERTS  %d", len(as)), p.Red)
+	var es []entry
+	add := func(row int, bg color.Color, left []Span, right ...Span) {
+		es = append(es, entry{left: left, right: right, bg: bg, row: row})
+	}
+	as := m.alerts()
+	if len(as) > 0 {
+		add(0, p.Bg, []Span{{Text: fmt.Sprintf(" SYSTEM ALERTS  %d", len(as)), Fg: p.Red, Bold: true}})
 		for i, a := range as {
 			icon, fg := m.alertIcon(a.kind)
 			bg := p.RedBg
 			if i == m.sel[TabOverview] {
 				bg = p.Overlay
 			}
-			c.addLR(bg, []Span{{Text: " " + icon + " ", Fg: fg, Bold: true}, {Text: a.text, Fg: p.Fg}},
-				[]Span{{Text: " " + ago(now, a.since) + " ", Fg: p.Muted}})
+			add(i, bg, []Span{{Text: " " + icon + " ", Fg: fg, Bold: true}, {Text: a.text, Fg: p.Fg}},
+				Span{Text: " " + ago(now, a.since) + " ", Fg: p.Muted})
 		}
-		c.blank()
+		add(len(as)-1, p.Bg, nil)
 	}
-	var v *adapter.SessionView
-	if m.st.Panel != nil {
-		v = m.st.Panel.View
-	}
+	row := len(as)
+	v := m.view()
 	if v != nil && !v.NoView() && v.Narrative != nil && v.Narrative.Text != "" {
-		c.add(Span{Text: " from narrator (" + v.Narrator + ") · " + ago(now, v.Narrative.At) + " ago", Fg: p.Muted, Italic: true})
+		add(row, p.Bg, []Span{{Text: " from narrator (" + v.Narrator + ") · " + ago(now, v.Narrative.At) + " ago", Fg: p.Muted, Italic: true}})
 		lines := wrap(v.Narrative.Text, m.w-2)
 		for _, l := range lines[:min(len(lines), 6)] {
-			c.add(Span{Text: " " + l, Fg: p.Fg})
+			add(row, p.Bg, []Span{{Text: " " + l, Fg: p.Fg}})
 		}
 	} else {
-		c.add(Span{Text: " No narrator summary yet.", Fg: p.Faint, Italic: true})
+		add(row, p.Bg, []Span{{Text: " No narrator summary yet.", Fg: p.Faint, Italic: true}})
 	}
-	c.blank()
+	add(row, p.Bg, nil)
 	if v != nil && v.Lifecycle != nil {
+		row++
 		lc := v.Lifecycle
 		spans := []Span{{Text: " Epic ", Fg: p.Muted}, {Text: orDash(lc.Name), Fg: p.Fg, Bold: true}, {Text: " "}, m.lifecycleCapsule(lc.State)}
 		if !lc.OpenedAt.IsZero() {
@@ -88,12 +129,17 @@ func (m Model) overview(c *canvas) {
 		if lc.Crew != "" {
 			spans = append(spans, Span{Text: " · crew " + lc.Crew, Fg: p.Muted})
 		}
-		c.add(spans...)
-		c.blank()
+		add(row, p.Bg, spans)
+		add(row, p.Bg, nil)
 	}
 	if v != nil && v.HandBack != nil {
-		m.handBackCard(c, v.HandBack)
+		row++
+		for _, e := range m.handBackCard(v.HandBack) {
+			e.row = row
+			es = append(es, e)
+		}
 	}
+	return es
 }
 
 func orDash(s string) string {
@@ -134,12 +180,14 @@ func (m Model) lifecycleCapsule(state string) Span {
 // handBackCardLines is how much of a hand-back the card shows.
 const handBackCardLines = 8
 
-// handBackCard shows the hand-back's first lines with its Blocked on me
+// handBackCard is the hand-back's first lines with its Blocked on me
 // section picked out, pulled up when it starts past the card's end.
-func (m Model) handBackCard(c *canvas, hb *adapter.HandBack) {
+func (m Model) handBackCard(hb *adapter.HandBack) []entry {
 	p, bg := m.pal, m.pal.BlueBg
+	var es []entry
+	add := func(spans ...Span) { es = append(es, entry{left: spans, bg: bg}) }
 	title := fmt.Sprintf(" Hand-back #%d · %s · %s ago", hb.Seq, hb.By, ago(m.now(), hb.At))
-	c.addLR(bg, []Span{{Text: title, Fg: p.Blue, Bold: true}}, []Span{{Text: "o", Fg: p.Fg, Bold: true}, {Text: " open ", Fg: p.Muted}})
+	es = append(es, entry{left: []Span{{Text: title, Fg: p.Blue, Bold: true}}, right: []Span{{Text: "o", Fg: p.Fg, Bold: true}, {Text: " open ", Fg: p.Muted}}, bg: bg})
 	lines := strings.Split(strings.TrimRight(hb.Body, "\n"), "\n")
 	blocked := false
 	for i, l := range lines {
@@ -155,20 +203,21 @@ func (m Model) handBackCard(c *canvas, hb *adapter.HandBack) {
 		case blocked:
 			fg = p.Yellow
 		}
-		c.addOn(bg, Span{Text: "   " + l, Fg: fg, Bold: bold})
+		add(Span{Text: "   " + l, Fg: fg, Bold: bold})
 	}
 	if len(lines) > handBackCardLines {
 		for i := handBackCardLines; i < len(lines); i++ {
 			if blockedOnMe.MatchString(lines[i]) {
-				c.addOn(bg, Span{Text: "   … " + strings.TrimSpace(lines[i]), Fg: p.Yellow, Bold: true})
+				add(Span{Text: "   … " + strings.TrimSpace(lines[i]), Fg: p.Yellow, Bold: true})
 				if i+1 < len(lines) {
-					c.addOn(bg, Span{Text: "   " + lines[i+1], Fg: p.Yellow})
+					add(Span{Text: "   " + lines[i+1], Fg: p.Yellow})
 				}
 				break
 			}
 		}
-		c.addOn(bg, Span{Text: fmt.Sprintf("   … %d more lines", len(lines)-handBackCardLines), Fg: p.Muted, Italic: true})
+		add(Span{Text: fmt.Sprintf("   … %d more lines", len(lines)-handBackCardLines), Fg: p.Muted, Italic: true})
 	}
+	return es
 }
 
 func (m Model) membersView(c *canvas) {
@@ -361,12 +410,12 @@ func (m Model) GraphRegion() Rect {
 func (m Model) graphView(c *canvas) {
 	p := m.pal
 	msgs := m.graphMessages()
-	n := len(msgs)
-	if m.graph >= 0 {
-		n = m.graph + 1
+	at, replaying := m.replayIndex()
+	if !replaying {
+		at = len(msgs) - 1
 	}
 	live := capsule("● Live", p.Faint, p.Surface)
-	if m.graph < 0 {
+	if !replaying {
 		live = capsule("● Live", p.Green, p.GreenBg)
 	}
 	hide := "○"
@@ -379,18 +428,15 @@ func (m Model) graphView(c *canvas) {
 	}
 	c.addLR(p.Surface,
 		[]Span{{Text: " |<  <  >  ", Fg: p.Fg, Bold: true}, live, {Text: "  Hide retired " + hide, Fg: p.Muted}},
-		[]Span{{Text: fmt.Sprintf("%d / %d messages%s ", n, len(msgs), span), Fg: p.Muted}})
+		[]Span{{Text: fmt.Sprintf("%d / %d messages%s ", at+1, len(msgs), span), Fg: p.Muted}})
 	for range m.GraphRegion().H {
 		c.blank()
 	}
 	c.add(Span{Text: " ──", Fg: p.Green}, Span{Text: " drained  ", Fg: p.Muted},
 		Span{Text: "━━", Fg: p.Yellow, Bold: true}, Span{Text: " obligation  ", Fg: p.Muted},
 		Span{Text: "┄┄", Fg: p.Faint}, Span{Text: " queued · bounced", Fg: p.Muted})
-	if len(msgs) > 0 {
-		cur := msgs[len(msgs)-1]
-		if m.graph >= 0 {
-			cur = msgs[m.graph]
-		}
+	if at >= 0 {
+		cur := msgs[at]
 		c.add(Span{Text: " " + cur.From + " → " + recipients(cur), Fg: p.Fg}, Span{Text: " · " + cur.Subject, Fg: p.Muted})
 	}
 }

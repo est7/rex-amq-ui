@@ -268,7 +268,7 @@ func TestViewMapping(t *testing.T) {
 			t.Fatalf("hide retired: %q", lines(m.Frame())[2])
 		}
 		m = press(t, m, "L")
-		if m.graph != -1 {
+		if m.graphAt != "" {
 			t.Fatal("L did not return to Live")
 		}
 	})

@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/est7/rex-amq-ui/internal/apc"
@@ -75,12 +78,14 @@ func TestPanelProgram(t *testing.T) {
 	defer inW.Close()
 	out := &syncBuffer{}
 	errc := make(chan error, 1)
+	progc := make(chan *tea.Program, 1)
 	go func() {
 		errc <- runPanel(context.Background(), panelConfig{
 			Session: "session:s", AdapterBin: script, In: inR, Out: out, Width: 70, Height: 48,
-			Options: ui.Options{},
+			Options: ui.Options{}, started: func(p *tea.Program) { progc <- p },
 		})
 	}()
+	prog := <-progc
 	shows := func(s string) func() bool {
 		return func() bool { raw, _ := out.snapshot(); return strings.Contains(ansi.Strip(raw), s) }
 	}
@@ -94,6 +99,8 @@ func TestPanelProgram(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the rest of the stream", func() bool { _, err := os.Stat(done); return err == nil })
+	// Rex resizes a hidden layer's block when its window changes size.
+	prog.Send(tea.WindowSizeMsg{Width: 80, Height: 40})
 	time.Sleep(400 * time.Millisecond)
 	if _, after := out.snapshot(); after != before {
 		raw, _ := out.snapshot()
@@ -135,11 +142,69 @@ func TestPanelProgram(t *testing.T) {
 	t.Logf("line erases the renderer used, all under a set background: %v", seen)
 }
 
+// sgrBackground applies an SGR's parameters to bg (whether a background
+// colour is set), refusing what it does not model: reverse video, and
+// extended colours whose arguments are not 5;n or 2;r;g;b in 0..255.
+func sgrBackground(params string, bg *bool) error {
+	ps := strings.Split(params, ";")
+	num := func(s string) int {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return -1
+		}
+		return n
+	}
+	for i := 0; i < len(ps); i++ {
+		p := num(ps[i])
+		if ps[i] == "" {
+			p = 0
+		}
+		switch {
+		case p == 0 || p == 49:
+			*bg = false
+		case p >= 40 && p <= 47, p >= 100 && p <= 107:
+			*bg = true
+		case p == 38 || p == 48 || p == 58:
+			rest := ps[i+1:]
+			args := 0
+			switch {
+			case len(rest) >= 2 && rest[0] == "5":
+				args = 2
+			case len(rest) >= 4 && rest[0] == "2":
+				args = 4
+			default:
+				return fmt.Errorf("SGR %q: extended colour without 5;n or 2;r;g;b", params)
+			}
+			for _, a := range rest[1:args] {
+				if v := num(a); v < 0 || v > 255 {
+					return fmt.Errorf("SGR %q: colour argument %q", params, a)
+				}
+			}
+			if p == 48 {
+				*bg = true
+			}
+			i += args
+		case p == 7:
+			return fmt.Errorf("SGR %q: reverse video is not modelled", params)
+		case p >= 1 && p <= 9, p >= 21 && p <= 29, p >= 30 && p <= 37, p == 39, p == 59, p >= 90 && p <= 97:
+		default:
+			return fmt.Errorf("SGR %q: unmodelled parameter %q", params, ps[i])
+		}
+	}
+	return nil
+}
+
 func TestErasesCheckDetectsDefaultBackground(t *testing.T) {
-	if _, bad := erases("\x1b[48;2;1;2;3mab\x1b[38;2;49;0;0mc\x1b[K"); bad != nil {
+	if _, bad := erases("\x1b[48;2;1;2;3mab\x1b[38;2;49;0;0mc\x1b[>4;1m\x1b[K"); bad != nil {
 		t.Fatalf("an erase under a background flagged: %v", bad)
 	}
-	for _, raw := range []string{"ab\x1b[K", "\x1b[48;2;1;2;3mab\x1b[m\x1b[5X", "\x1b[48;5;3ma\x1b[49m\x1b[K"} {
+	for _, raw := range []string{"ab\x1b[K", "\x1b[48;2;1;2;3mab\x1b[m\x1b[5X", "\x1b[48;5;3ma\x1b[49m\x1b[K",
+		"\x1b[10m\x1b[K",                   // a font, not a background
+		"\x1b[48;2;1;2;3m\x1b[7m\x1b[K",    // reverse video
+		"\x1b[48;2;1;2m\x1b[K",             // truncated colour
+		"\x1b[48;2;1;2;300m\x1b[K",         // out of range
+		"\x1b[48;2;1;2;3m\x1b[53m\x1b[K"} { // unmodelled
+
 		if _, bad := erases(raw); bad == nil {
 			t.Errorf("%q: not detected", raw)
 		}
@@ -160,27 +225,11 @@ func erases(raw string) (seen map[string]int, bad []string) {
 		params, final := m[1], m[2]
 		switch final {
 		case "m":
-			ps := strings.Split(params, ";")
-			for i := 0; i < len(ps); i++ {
-				switch p := ps[i]; {
-				case p == "" || p == "0" || p == "49":
-					bg = false
-				case p == "48":
-					bg = true
-					if i+1 < len(ps) && ps[i+1] == "2" {
-						i += 4
-					} else {
-						i += 2
-					}
-				case p == "38" || p == "58":
-					if i+1 < len(ps) && ps[i+1] == "2" {
-						i += 4
-					} else {
-						i += 2
-					}
-				case len(p) == 2 && (p[0] == '4' || p == "10"):
-					bg = true
-				}
+			if strings.ContainsAny(params[:min(len(params), 1)], "<=>?") {
+				continue // a private mode (XTMODKEYS), not SGR
+			}
+			if err := sgrBackground(params, &bg); err != nil {
+				bad = append(bad, err.Error())
 			}
 		case "K", "X":
 			seen["CSI "+params+final]++

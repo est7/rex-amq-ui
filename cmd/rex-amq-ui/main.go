@@ -110,6 +110,8 @@ type panelConfig struct {
 	// Size, when set, is the terminal's size (tests: the output is no
 	// terminal to ask).
 	Width, Height int
+	// started, when set, is given the program before it runs (tests).
+	started func(*tea.Program)
 }
 
 // runPanel runs the panel until the human quits it (Q).
@@ -136,12 +138,17 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(cfg.Out),
 		// Every cell's background is the panel's surface integrity: never
 		// let NO_COLOR or a dumb TERM strip it.
-		tea.WithColorProfile(colorprofile.TrueColor)}
+		tea.WithColorProfile(colorprofile.TrueColor),
+		// A hidden panel writes nothing, a resize's repaint included.
+		tea.WithFilter(ui.Filter)}
 	if cfg.Width > 0 && cfg.Height > 0 {
 		opts = append(opts, tea.WithWindowSize(cfg.Width, cfg.Height))
 	}
 	prog := tea.NewProgram(model, opts...)
 	in.On = func(c apc.Command) { prog.Send(c) }
+	if cfg.started != nil {
+		cfg.started(prog)
+	}
 
 	var wg sync.WaitGroup
 	wg.Go(func() { stream(ctx, cfg, prog) })
