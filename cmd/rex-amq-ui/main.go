@@ -126,14 +126,23 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 		panel = layer.New(cfg.Server, cfg.Session, cfg.Block, cfg.Options.Focused)
 		ctl = panel
 	}
+	// The renderer and the Graph tab's Kitty commands share the terminal;
+	// one lock keeps each write whole.
+	out := lockOutput(cfg.Out)
+	var gfx *ui.Graphics
+	if cfg.Graphics != nil {
+		g := *cfg.Graphics
+		g.Out = out
+		gfx = &g
+	}
 	cache, _ := os.UserCacheDir()
 	model := ui.New(ui.Deps{
 		Layer: ctl, Clock: ui.SystemClock{}, Exec: execTool, LookPath: exec.LookPath,
-		CacheDir: cache, Editor: os.Getenv("EDITOR"), Graphics: cfg.Graphics,
+		CacheDir: cache, Editor: os.Getenv("EDITOR"), Graphics: gfx,
 	}, cfg.Options)
 
 	in := apc.NewReader(cfg.In)
-	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(cfg.Out),
+	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(out),
 		// Every cell's background is the panel's surface integrity: never
 		// let NO_COLOR or a dumb TERM strip it.
 		tea.WithColorProfile(colorprofile.TrueColor),
@@ -162,14 +171,43 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 	if m, ok := final.(ui.Model); ok {
 		// The Graph image and pixel mouse reports outlive the program's
 		// own terminal reset: clear them, and the unread frame files.
-		seq, cerr := m.CloseGraphics()
-		if seq != "" {
-			_, werr := io.WriteString(cfg.Out, seq)
-			cerr = errors.Join(cerr, werr)
-		}
-		err = errors.Join(err, cerr)
+		err = errors.Join(err, m.CloseGraphics())
 	}
 	return err
+}
+
+// lockedWriter serializes writes to one terminal from the renderer and
+// from the Graph tab.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+func (l *lockedWriter) WriteString(s string) (int, error) { return l.Write([]byte(s)) }
+
+// lockedFile is a lockedWriter that is still the terminal's file to Bubble
+// Tea, which finds the terminal by its Fd (raw mode, size, colour).
+type lockedFile struct {
+	*os.File
+	l *lockedWriter
+}
+
+func (f lockedFile) Write(p []byte) (int, error)       { return f.l.Write(p) }
+func (f lockedFile) WriteString(s string) (int, error) { return f.l.WriteString(s) }
+
+// lockOutput is w behind a lock, keeping it a file when it is one.
+func lockOutput(w io.Writer) io.Writer {
+	l := &lockedWriter{w: w}
+	if f, ok := w.(*os.File); ok {
+		return lockedFile{File: f, l: l}
+	}
+	return l
 }
 
 // stream runs the adapter and hands its updates to the panel.

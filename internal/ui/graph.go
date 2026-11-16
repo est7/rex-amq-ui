@@ -2,7 +2,9 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -15,23 +17,35 @@ import (
 	"github.com/est7/rex-amq-ui/internal/raster"
 )
 
-// Graphics is where the Graph tab's image goes: Kitty frame files in Dir
-// (kitty.DefaultDir in production) named for process PID.
+// Graphics is where the Graph tab's image goes.
 type Graphics struct {
+	// Dir and PID name the Kitty frame files (kitty.DefaultDir and the
+	// process id in production).
 	Dir string
 	PID int
+	// Out is the terminal: the writer the program renders to, safe to
+	// write while the renderer writes. Every graphics command is written
+	// to it from Update, so they reach the terminal in the order Update
+	// made them; a teardown can never be overtaken by the frame before it,
+	// nor arrive after the next showing's frame.
+	Out io.Writer
 }
 
-// settleDelay is how long a new or resized image waits for the renderer:
-// on a resize or a resume it erases and repaints the screen, which deletes
-// images, and its write follows ours within the same tick.
+// settleDelay is how long a new or resized showing waits before its first
+// frame: on a resize or a resume the renderer erases and repaints the
+// screen, which deletes images, and that write can follow ours.
 const settleDelay = 50 * time.Millisecond
 
 // graphTab is the Graph tab's image: the graph model, the Kitty transport,
-// and the frame loop. The Model holds it by pointer; only Update changes
-// it (Bubble Tea runs Update and Filter on one goroutine), and the
-// commands it returns carry values, never the pointer.
+// and the frame loop. The Model holds it by pointer and only Update
+// changes it (Bubble Tea runs Update on one goroutine); the commands it
+// returns carry values, never the pointer.
+//
+// What it believes the terminal shows (an image, pixel mouse reports)
+// changes only after the write that does it succeeded; a failed teardown
+// is tried again on the next Update.
 type graphTab struct {
+	out    io.Writer
 	g      *graph.Model
 	tr     *kitty.Transport
 	sched  *kitty.Scheduler
@@ -41,12 +55,13 @@ type graphTab struct {
 	// change the cell size happened meanwhile, so ask once more after it.
 	asking, again bool
 	phase         phase
-	// on: a frame may be on screen; mouse: pixel mouse reports are on.
-	on, mouse bool
+	// showing counts showings; a settle message of an earlier one is
+	// stale.
+	showing uint64
+	// mouse: pixel mouse reports are on.
+	mouse bool
 	// dirty: the picture changed since the last frame.
 	dirty bool
-	// gen counts showings; output of an earlier one is stale (Filter).
-	gen uint64
 	// at, hide are the replay cursor and Hide retired the image shows.
 	at   string
 	hide bool
@@ -55,6 +70,9 @@ type graphTab struct {
 	visible   bool
 	owner     string
 	connected bool
+	// stalled: the last frame was refused because the terminal had not
+	// read the ones before it.
+	stalled bool
 	// scene is the last frame drawn, for hit tests.
 	scene graph.Scene
 }
@@ -73,7 +91,7 @@ const (
 )
 
 func newGraphTab(g Graphics, clock Clock) *graphTab {
-	return &graphTab{g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(30)}
+	return &graphTab{out: g.Out, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(30)}
 }
 
 // NeedsAnimation makes graphTab the scheduler's Animator: a frame is due
@@ -87,16 +105,8 @@ type (
 		err  error
 	}
 	graphTick   struct{ t kitty.Tick }
-	graphSettle struct{ gen uint64 }
-	// graphicsOut is bytes for the terminal from showing gen; it prints
-	// through tea.Raw, and Filter drops it once gen is over.
-	graphicsOut struct {
-		gen uint64
-		seq string
-	}
+	graphSettle struct{ showing uint64 }
 )
-
-func (g graphicsOut) String() string { return g.seq }
 
 // graphics keeps the image in step with the model after msg: it measures
 // the cell (when the tab shows, on a resize, an owner change, or a new
@@ -134,7 +144,7 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 	case tea.MouseClickMsg:
 		cmds = append(cmds, m.click(msg))
 	case graphSettle:
-		if msg.gen == gt.gen && gt.phase == settling {
+		if msg.showing == gt.showing && gt.phase == settling {
 			gt.phase = drawing
 		}
 	case graphTick:
@@ -167,8 +177,8 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 
 	showing := visible && gt.cell.Valid()
 	switch {
-	case !showing && (gt.phase != hidden || gt.on || gt.mouse):
-		cmds = append(cmds, gt.hideImage())
+	case !showing && (gt.phase != hidden || gt.tr.Shown() || gt.mouse):
+		m.hideImage()
 	case showing && gt.phase == hidden:
 		cmds = append(cmds, gt.settle())
 	case showing && gt.phase == drawing:
@@ -180,12 +190,14 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 // settle starts a showing: the first frame waits settleDelay.
 func (gt *graphTab) settle() tea.Cmd {
 	gt.phase, gt.dirty = settling, true
-	gen := gt.gen
-	return tea.Tick(settleDelay, func(time.Time) tea.Msg { return graphSettle{gen} })
+	gt.showing++
+	n := gt.showing
+	return tea.Tick(settleDelay, func(time.Time) tea.Msg { return graphSettle{n} })
 }
 
 // restart makes the next frame wait for the renderer again: a resize
-// erases the screen. The image may still be up, so on stays.
+// erases the screen. The image may still be up; the next frame replaces
+// it.
 func (gt *graphTab) restart() {
 	if gt.phase != hidden {
 		gt.sched.Stop()
@@ -193,24 +205,27 @@ func (gt *graphTab) restart() {
 	}
 }
 
-// hideImage deletes every image and turns pixel mouse reports off; the
-// frames still in flight turn stale.
-func (gt *graphTab) hideImage() tea.Cmd {
+// hideImage ends the showing: it deletes every image and turns pixel
+// mouse reports off. What fails to reach the terminal stays owed, and the
+// next Update tries again.
+func (m *Model) hideImage() {
+	gt := m.gfx
 	gt.sched.Stop()
-	gt.gen++
 	gt.phase = hidden
-	seq := ""
-	if gt.on {
-		seq = string(gt.tr.ClearAll())
+	var errs []error
+	if gt.tr.Shown() {
+		errs = append(errs, gt.tr.Clear(gt.out))
 	}
 	if gt.mouse {
-		seq += pixelmouse.Disable
+		if _, err := io.WriteString(gt.out, pixelmouse.Disable); err != nil {
+			errs = append(errs, err)
+		} else {
+			gt.mouse = false
+		}
 	}
-	gt.on, gt.mouse = false, false
-	if seq == "" {
-		return nil
+	if err := errors.Join(errs...); err != nil {
+		m.hint, m.hintBad = "graph: "+err.Error(), true
 	}
-	return tea.Raw(graphicsOut{gen: gt.gen, seq: seq})
 }
 
 // kick starts the frame loop when a frame is due and none is running.
@@ -224,26 +239,42 @@ func (m *Model) kick() tea.Cmd {
 }
 
 // frame draws the image when the loop's tick t fires, and arms the next.
+// A tick of a stopped loop, or one that fires while no showing is drawing,
+// changes nothing: the redraw it would have consumed stays due.
 func (m *Model) frame(t kitty.Tick) tea.Cmd {
 	gt := m.gfx
-	gt.dirty = false
-	render, next, again := gt.sched.Fire(t, gt, m.deps.Clock.Now())
-	if !render || !gt.visible || !gt.cell.Valid() || gt.phase != drawing {
+	if gt.phase != drawing || !gt.sched.Owns(t) {
 		return nil
 	}
-	var cmds []tea.Cmd
-	if out := m.draw(); out != "" {
-		cmds = append(cmds, tea.Raw(graphicsOut{gen: gt.gen, seq: out}))
+	gt.dirty = false
+	_, nt, next, again := gt.sched.Fire(t, gt, m.deps.Clock.Now())
+	if err := m.draw(); err != nil {
+		if errors.Is(err, kitty.ErrBacklog) {
+			// Keep trying at the frame rate until the terminal reads.
+			gt.dirty = true
+			if !gt.stalled {
+				gt.stalled = true
+				m.hint, m.hintBad = "graph: the terminal has not read the last frames", true
+			}
+			if !again {
+				return m.kick()
+			}
+		} else {
+			m.hint, m.hintBad = "graph: "+err.Error(), true
+		}
+	} else if gt.stalled {
+		gt.stalled = false
+		m.hint, m.hintBad = "", false
 	}
-	if again {
-		cmds = append(cmds, tea.Tick(next, func(time.Time) tea.Msg { return graphTick{t} }))
+	if !again {
+		return nil
 	}
-	return tea.Batch(cmds...)
+	return tea.Tick(next, func(time.Time) tea.Msg { return graphTick{nt} })
 }
 
-// draw paints the scene into the region and returns the bytes that show
-// it, pixel mouse reports switched on with the first.
-func (m *Model) draw() string {
+// draw paints the scene into the region and writes the frame to the
+// terminal, switching pixel mouse reports on before the first.
+func (m *Model) draw() error {
 	gt := m.gfx
 	r := m.GraphRegion()
 	sz := graph.Size{Cols: r.W, Rows: r.H, Cell: gt.cell}
@@ -253,17 +284,13 @@ func (m *Model) draw() string {
 	}
 	gt.scene = gt.g.Scene(sz)
 	graph.Paint(gt.canvas, gt.scene, graph.FromTheme(m.pal))
-	b, err := gt.tr.Frame(gt.canvas.Image(), kitty.Cell{Col: r.X, Row: r.Y})
-	if err != nil {
-		m.hint, m.hintBad = "graph: "+err.Error(), true
-		return ""
-	}
-	seq := string(b)
 	if !gt.mouse {
-		seq, gt.mouse = pixelmouse.Enable+seq, true
+		if _, err := io.WriteString(gt.out, pixelmouse.Enable); err != nil {
+			return err
+		}
+		gt.mouse = true
 	}
-	gt.on = true
-	return seq
+	return gt.tr.Show(gt.out, gt.canvas.Image(), kitty.Cell{Col: r.X, Row: r.Y})
 }
 
 // measure reads the cell size from the panel's block.
@@ -285,7 +312,7 @@ func (m *Model) measure() tea.Cmd {
 // does on Members.
 func (m *Model) click(c tea.MouseClickMsg) tea.Cmd {
 	gt := m.gfx
-	if c.Button != tea.MouseLeft || !gt.on {
+	if c.Button != tea.MouseLeft || !gt.tr.Shown() {
 		return nil
 	}
 	r := m.GraphRegion()
@@ -309,16 +336,18 @@ func (m *Model) click(c tea.MouseClickMsg) tea.Cmd {
 	return nil
 }
 
-// CloseGraphics is what to write when the panel exits: delete the image
-// and turn pixel mouse reports off, if it ever drew; it also removes the
-// frame files the terminal has not read.
-func (m Model) CloseGraphics() (string, error) {
+// CloseGraphics runs when the panel exits: it deletes the image and turns
+// pixel mouse reports off if they are on, writing to the terminal after
+// the program's own reset, and removes the frame files the terminal has
+// not read.
+func (m Model) CloseGraphics() error {
 	if m.gfx == nil {
-		return "", nil
+		return nil
 	}
-	var seq string
-	if cmd := m.gfx.hideImage(); cmd != nil {
-		seq = fmt.Sprint(cmd().(tea.RawMsg).Msg)
+	m.hideImage()
+	var err error
+	if m.gfx.tr.Shown() || m.gfx.mouse {
+		err = fmt.Errorf("graph: the image or pixel mouse may still be on: %s", m.hint)
 	}
-	return seq, m.gfx.tr.Cleanup()
+	return errors.Join(err, m.gfx.tr.Cleanup())
 }

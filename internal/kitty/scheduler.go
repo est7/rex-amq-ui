@@ -6,8 +6,8 @@ import "time"
 // time alone.
 type Animator interface{ NeedsAnimation() bool }
 
-// Tick names one frame loop. A tick from a loop that was stopped or
-// replaced is stale and draws nothing.
+// Tick is one firing of a frame loop. A tick already fired, or one from a
+// loop that was stopped or replaced, is stale and draws nothing.
 type Tick struct{ gen uint64 }
 
 // Scheduler decides when the next animation frame is due, at 24-30 fps,
@@ -44,19 +44,21 @@ func (s *Scheduler) Kick(a Animator, now time.Time) (t Tick, delay time.Duration
 }
 
 // Fire is called when t's timer goes off. render says whether to draw a
-// frame now; again whether to fire t once more after next. The loop's
+// frame now; again whether to arm next, the loop's next tick, to fire after
+// delay. Each tick fires once: a late duplicate draws nothing. The loop's
 // last frame is the one drawn when a stopped needing animation, so the
 // settled picture shows.
-func (s *Scheduler) Fire(t Tick, a Animator, now time.Time) (render bool, next time.Duration, again bool) {
-	if !s.pending || t.gen != s.gen {
-		return false, 0, false
+func (s *Scheduler) Fire(t Tick, a Animator, now time.Time) (render bool, next Tick, delay time.Duration, again bool) {
+	if !s.Owns(t) {
+		return false, Tick{}, 0, false
 	}
+	s.gen++
 	s.last = now
 	if !a.NeedsAnimation() {
 		s.pending = false
-		return true, 0, false
+		return true, Tick{}, 0, false
 	}
-	return true, s.interval, true
+	return true, Tick{s.gen}, s.interval, true
 }
 
 // Stop ends the frame loop (pause, minimize, leaving the tab); its
@@ -65,3 +67,7 @@ func (s *Scheduler) Stop() {
 	s.pending = false
 	s.gen++
 }
+
+// Owns reports whether t is the running loop's tick. A caller checks it
+// before acting on a tick, so a stale one changes nothing.
+func (s *Scheduler) Owns(t Tick) bool { return s.pending && t.gen == s.gen }

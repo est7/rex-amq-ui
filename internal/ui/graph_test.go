@@ -2,11 +2,12 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,82 +36,138 @@ func (r *cellRecorder) CellSize(context.Context) (int, int, error) {
 	return r.w, r.h, r.err
 }
 
-// rig runs the panel the way the program does: each message a command
-// produces goes through Filter, raw output is collected, everything else
-// goes into Update, whose commands run in turn. Commands left when a run
-// stops wait for the next one, as the program would run them: a working
-// member animates forever, so every run is capped at n messages.
-type rig struct {
-	t       *testing.T
-	m       Model
-	pending []tea.Cmd
+// fakeTerm is a Kitty terminal: it applies the graphics commands written
+// to it in order and keeps what they leave on screen. When reads is set it
+// reads each t=t frame file as it gets the command, deleting it as Kitty
+// does; a file already gone loads no image.
+type fakeTerm struct {
+	reads bool
+	log   strings.Builder
+	// images are the placed image ids, each with the frame file number it
+	// shows; mouse the mouse modes on.
+	images map[int]int
+	mouse  map[string]bool
+	// seqs are the frame numbers transmitted, in order.
+	seqs []int
 }
 
-func newRig(t *testing.T, m Model) *rig { return &rig{t: t, m: m} }
+func newTerm() *fakeTerm {
+	return &fakeTerm{reads: true, images: map[int]int{}, mouse: map[string]bool{}}
+}
 
-// send updates the panel with msg and runs at most n messages after it.
-func (r *rig) send(msg tea.Msg, n int) string {
-	r.t.Helper()
+var termCmd = regexp.MustCompile(`\x1b_Ga=T,f=32,t=t,s=\d+,v=\d+,i=(\d),p=1,C=1,q=2;([A-Za-z0-9+/=]+)\x1b\\|\x1b_Ga=d,d=I,i=(\d),q=2\x1b\\|(\x1b_Ga=d,d=A,q=2\x1b\\)|\x1b\[\?(1002|1006|1016)([hl])`)
+
+var frameNo = regexp.MustCompile(`-(\d+)\.rgba$`)
+
+func (f *fakeTerm) Write(p []byte) (int, error) {
+	f.log.Write(p)
+	for _, m := range termCmd.FindAllStringSubmatch(string(p), -1) {
+		switch {
+		case m[1] != "":
+			id, _ := strconv.Atoi(m[1])
+			b, _ := base64.StdEncoding.DecodeString(m[2])
+			path := string(b)
+			n, _ := strconv.Atoi(frameNo.FindStringSubmatch(path)[1])
+			f.seqs = append(f.seqs, n)
+			if !f.reads {
+				f.images[id] = n
+				continue
+			}
+			if os.Remove(path) == nil {
+				f.images[id] = n
+			}
+		case m[3] != "":
+			id, _ := strconv.Atoi(m[3])
+			delete(f.images, id)
+		case m[4] != "":
+			clear(f.images)
+		case m[5] != "":
+			f.mouse[m[5]] = m[6] == "h"
+		}
+	}
+	return len(p), nil
+}
+
+// showing reports whether exactly one image is up with pixel mouse on;
+// blank whether nothing is up and every mouse mode is off.
+func (f *fakeTerm) showing() bool {
+	return len(f.images) == 1 && f.mouse["1002"] && f.mouse["1006"] && f.mouse["1016"]
+}
+
+func (f *fakeTerm) blank() bool {
+	return len(f.images) == 0 && !f.mouse["1002"] && !f.mouse["1006"] && !f.mouse["1016"]
+}
+
+func (f *fakeTerm) String() string {
+	return "images " + strconv.Itoa(len(f.images)) + " mouse " + strconv.FormatBool(f.mouse["1016"])
+}
+
+// rig runs the panel the way the program does, but lets a test choose the
+// order: the messages commands produce wait in held until delivered, each
+// through Filter and Update, whose commands run and add theirs.
+type rig struct {
+	t    *testing.T
+	m    Model
+	term *fakeTerm
+	held []tea.Msg
+}
+
+func (r *rig) exec(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case nil:
+	case tea.BatchMsg:
+		for _, c := range msg {
+			r.exec(c)
+		}
+	default:
+		r.held = append(r.held, msg)
+	}
+}
+
+func (r *rig) deliver(msg tea.Msg) {
+	if msg = Filter(r.m, msg); msg == nil {
+		return
+	}
 	next, cmd := r.m.Update(msg)
 	r.m = next.(Model)
-	r.pending = append(r.pending, cmd)
-	return r.run(n)
+	r.exec(cmd)
 }
 
-func (r *rig) run(n int) string {
-	var out strings.Builder
-	for len(r.pending) > 0 && n > 0 {
-		c := r.pending[0]
-		r.pending = r.pending[1:]
-		if c == nil {
-			continue
-		}
-		msg := c()
-		if b, ok := msg.(tea.BatchMsg); ok {
-			r.pending = append(r.pending, b...)
-			continue
-		}
-		if msg == nil {
-			continue
-		}
+// run delivers held messages in order, at most n: a working member
+// animates forever.
+func (r *rig) run(n int) {
+	for n > 0 && len(r.held) > 0 {
+		msg := r.held[0]
+		r.held = r.held[1:]
 		n--
-		if msg = Filter(r.m, msg); msg == nil {
-			continue
-		}
-		if raw, ok := msg.(tea.RawMsg); ok {
-			out.WriteString(fmt.Sprint(raw.Msg))
-			continue
-		}
-		next, more := r.m.Update(msg)
-		r.m = next.(Model)
-		r.pending = append(r.pending, more)
+		r.deliver(msg)
 	}
-	return out.String()
 }
 
-// shown is a rig on the Graph tab with its first frame out.
-func shown(t *testing.T, ctl Controller) (*rig, string) {
-	t.Helper()
-	r := newRig(t, graphPanel(t, ctl))
-	out := r.send(mustTab("graph"), 6)
-	if transmitRE.FindString(out) == "" {
-		t.Fatalf("no first frame: %q", out)
-	}
-	return r, out
+// send delivers msg, runs at most n messages after it, and returns what
+// the terminal got meanwhile.
+func (r *rig) send(msg tea.Msg, n int) string {
+	before := r.term.log.Len()
+	r.deliver(msg)
+	r.run(n)
+	return r.term.log.String()[before:]
 }
 
-// firstFrame is out up to the end of its first frame's commands.
-func firstFrame(out string) string {
-	loc := transmitRE.FindStringIndex(out)
-	if loc == nil {
-		return out
+// take removes and returns the held messages of type T, keeping the rest.
+func take[T tea.Msg](r *rig) []tea.Msg {
+	var out, keep []tea.Msg
+	for _, m := range r.held {
+		if _, ok := m.(T); ok {
+			out = append(out, m)
+		} else {
+			keep = append(keep, m)
+		}
 	}
-	rest := out[loc[1]:]
-	if strings.HasPrefix(rest, "\x1b_Ga=d,d=I") {
-		end := strings.Index(rest, "\x1b\\") + 2
-		return out[:loc[1]+end]
-	}
-	return out[:loc[1]]
+	r.held = keep
+	return out
 }
 
 const (
@@ -119,38 +176,45 @@ const (
 	boardH = 40
 )
 
-func graphPanel(t *testing.T, ctl Controller) Model {
+func panelOn(t *testing.T, fixture string, ctl Controller, term *fakeTerm) *rig {
 	t.Helper()
-	now := time.Time(fixtures["edited-crew-attention"])
-	return build(t, "edited-crew-attention", boardW, boardH,
-		Deps{Layer: ctl, Clock: movingClock{&now}, Graphics: &Graphics{Dir: t.TempDir(), PID: 77}}, Options{})
+	now := time.Time(fixtures[fixture])
+	m := build(t, fixture, boardW, boardH,
+		Deps{Layer: ctl, Clock: movingClock{&now}, Graphics: &Graphics{Dir: t.TempDir(), PID: 77, Out: term}}, Options{})
+	return &rig{t: t, m: m, term: term}
+}
+
+// shown is a rig on the Graph tab of the crew fixture (two working
+// members: it animates) with its first frame on screen.
+func shown(t *testing.T, ctl Controller) *rig {
+	t.Helper()
+	r := panelOn(t, "edited-crew-attention", ctl, newTerm())
+	r.send(mustTab("graph"), 6)
+	if !r.term.showing() {
+		t.Fatalf("no first frame: %s, log %q", r.term, r.term.log.String())
+	}
+	return r
 }
 
 var transmitRE = regexp.MustCompile(`\x1b7\x1b\[(\d+);(\d+)H\x1b_Ga=T,f=32,t=t,s=(\d+),v=(\d+),i=(\d),p=1,C=1,q=2;([A-Za-z0-9+/=]+)\x1b\\\x1b8`)
 
+const clearOff = "\x1b_Ga=d,d=A,q=2\x1b\\" + pixelmouse.Disable
+
 func TestGraphTabShowsFrameInRegion(t *testing.T) {
 	ctl := &cellRecorder{w: cw, h: ch}
-	g, out := shown(t, ctl)
-	m := g.m
-	out = firstFrame(out)
-	r := m.GraphRegion()
+	r := shown(t, ctl)
+	out := r.term.log.String()
+	reg := r.m.GraphRegion()
 	if !strings.HasPrefix(out, pixelmouse.Enable) {
-		t.Fatalf("output %q: want pixel mouse on, then the frame", out)
+		t.Fatalf("terminal got %q: want pixel mouse on, then the frame", out)
 	}
 	tx := transmitRE.FindStringSubmatch(out)
-	if tx == nil {
-		t.Fatalf("no Kitty frame in %q", out)
+	want := []string{strconv.Itoa(reg.Y + 1), strconv.Itoa(reg.X + 1), strconv.Itoa(reg.W * cw), strconv.Itoa(reg.H * ch), "1"}
+	if tx == nil || strings.Join(tx[1:6], ",") != strings.Join(want, ",") {
+		t.Fatalf("first frame %q, want at row,col %s,%s size %sx%s id %s", tx, want[0], want[1], want[2], want[3], want[4])
 	}
-	want := []string{fmt.Sprint(r.Y + 1), fmt.Sprint(r.X + 1), fmt.Sprint(r.W * cw), fmt.Sprint(r.H * ch), "1"}
-	if got := tx[1:6]; strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("frame at row,col %s,%s size %sx%s id %s; want the region's top-left cell %v and its pixels", got[0], got[1], got[2], got[3], got[4], want)
-	}
-	if strings.Contains(out, "a=d") {
+	if strings.Contains(out[:strings.Index(out, tx[0])+len(tx[0])], "a=d") {
 		t.Errorf("first frame deletes an image: %q", out)
-	}
-	file := filepath.Join(m.deps.Graphics.Dir, "tty-graphics-protocol-rex-amq-ui-77-1.rgba")
-	if st, err := os.Stat(file); err != nil || st.Size() != int64(r.W*cw*r.H*ch*4) {
-		t.Errorf("frame file %v %v, want %d RGBA bytes", st, err, r.W*cw*r.H*ch*4)
 	}
 	if !strings.Contains(strings.Join(ctl.got(), " "), "cellsize") {
 		t.Errorf("calls %v: the cell size must come from the block", ctl.got())
@@ -158,8 +222,7 @@ func TestGraphTabShowsFrameInRegion(t *testing.T) {
 }
 
 func TestGraphTabTextFrameUnchanged(t *testing.T) {
-	g, _ := shown(t, &cellRecorder{w: cw, h: ch})
-	with := g.m
+	with := shown(t, &cellRecorder{w: cw, h: ch}).m
 	without := step(t, build(t, "edited-crew-attention", boardW, boardH, Deps{}, Options{}), mustTab("graph"))
 	if with.Frame() != without.Frame() {
 		t.Errorf("the Graph tab's cells change when the image is on: the region must stay background")
@@ -167,134 +230,280 @@ func TestGraphTabTextFrameUnchanged(t *testing.T) {
 }
 
 func TestGraphTabLeavingClears(t *testing.T) {
-	g, _ := shown(t, &cellRecorder{w: cw, h: ch})
-	if out := g.send(key("tab"), 12); out != string(kitty.NewTransport("", 0).ClearAll())+pixelmouse.Disable {
-		t.Fatalf("leaving Graph wrote %q, want ClearAll then pixel mouse off", out)
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	if out := r.send(key("tab"), 12); out != clearOff || !r.term.blank() {
+		t.Fatalf("leaving Graph wrote %q (%s), want ClearAll then pixel mouse off", out, r.term)
 	}
-	if out := g.run(12); out != "" {
-		t.Fatalf("after leaving Graph the frame loop wrote %q", out)
+	if out := r.send(key("tab"), 12); out != "" {
+		t.Fatalf("on another tab the panel wrote %q", out)
 	}
-	out := firstFrame(g.send(mustTab("graph"), 6))
-	if !strings.HasPrefix(out, pixelmouse.Enable) || strings.Contains(out, "a=d") || transmitRE.FindString(out) == "" {
-		t.Errorf("coming back wrote %q, want mouse on and a fresh frame with nothing to delete", out)
+	r.send(mustTab("graph"), 6)
+	if !r.term.showing() {
+		t.Errorf("coming back: %s", r.term)
 	}
 }
 
 func TestGraphTabPauseSilences(t *testing.T) {
-	g, _ := shown(t, &cellRecorder{w: cw, h: ch})
-	// The animation loop's next tick is pending: the pause must outrun it.
-	if len(g.pending) == 0 {
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	if len(r.held) == 0 {
 		t.Fatalf("no frame loop pending: the fixture's working members should animate")
 	}
-	next, cmd := g.m.Update(apc.Command{Verb: apc.Pause})
-	g.m = next.(Model)
-	g.pending = append([]tea.Cmd{cmd}, g.pending...)
-	out := g.run(4)
-	if out != string(kitty.NewTransport("", 0).ClearAll())+pixelmouse.Disable {
-		t.Fatalf("pause wrote %q, want ClearAll then pixel mouse off (and the pending tick nothing)", out)
+	ticks := take[graphTick](r)
+	if out := r.send(apc.Command{Verb: apc.Pause}, 0); out != clearOff {
+		t.Fatalf("pause wrote %q, want ClearAll then pixel mouse off", out)
 	}
-	out = g.run(12)
+	before := r.term.log.Len()
+	for _, tk := range ticks {
+		r.deliver(tk)
+	}
+	r.run(12)
 	for _, f := range frames(t, "edited-crew-attention") {
-		out += g.send(adapter.FrameUpdate{Frame: f}, 6)
+		r.send(adapter.FrameUpdate{Frame: f}, 6)
 	}
-	if out != "" {
+	if out := r.term.log.String()[before:]; out != "" || !r.term.blank() {
 		t.Errorf("paused panel wrote %q", out)
 	}
-	if out = g.send(apc.Command{Verb: apc.Resume}, 12); transmitRE.FindString(out) == "" {
-		t.Errorf("resume wrote %q, want the frame again", out)
+	r.send(apc.Command{Verb: apc.Resume}, 12)
+	if !r.term.showing() {
+		t.Errorf("resume: %s", r.term)
 	}
 }
 
-func TestGraphTabStaleOutputDropped(t *testing.T) {
-	g, _ := shown(t, &cellRecorder{w: cw, h: ch})
-	m := g.m
-	cur := tea.RawMsg{Msg: graphicsOut{gen: m.gfx.gen, seq: "x"}}
-	old := tea.RawMsg{Msg: graphicsOut{gen: m.gfx.gen - 1, seq: "x"}}
-	other := tea.RawMsg{Msg: "\x1b]11;?\x07"}
-	if Filter(m, cur) == nil || Filter(m, other) == nil {
-		t.Errorf("Filter dropped current graphics or someone else's raw output")
+// TestGraphTabQuickReenterTeardown: leave, come back, and leave again
+// before anything the first leave started has run. However late the held
+// messages arrive, the terminal ends with no image and pixel mouse off.
+func TestGraphTabQuickReenterTeardown(t *testing.T) {
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	r.deliver(key("tab"))
+	r.deliver(mustTab("graph"))
+	r.deliver(key("tab"))
+	held := r.held
+	r.held = nil
+	for i := len(held) - 1; i >= 0; i-- {
+		r.deliver(held[i])
 	}
-	if Filter(m, old) != nil {
-		t.Errorf("Filter let a frame of an earlier showing through")
+	r.run(20)
+	if !r.term.blank() {
+		t.Fatalf("after leaving twice: %s, log tail %q", r.term, tail(r.term.log.String()))
+	}
+	before := r.term.log.Len()
+	if err := r.m.CloseGraphics(); err != nil || r.term.log.Len() != before || !r.term.blank() {
+		t.Errorf("CloseGraphics on a clear terminal: err %v, wrote %q", err, r.term.log.String()[before:])
+	}
+}
+
+// TestGraphTabOldTeardownCannotEraseNewShowing: leave, come back and draw;
+// what the leave started arrives last and must not touch the new image.
+func TestGraphTabOldTeardownCannotEraseNewShowing(t *testing.T) {
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	r.deliver(key("tab"))
+	old := r.held
+	r.held = nil
+	r.send(mustTab("graph"), 8)
+	if !r.term.showing() {
+		t.Fatalf("the new showing drew nothing: %s", r.term)
+	}
+	for _, m := range old {
+		r.deliver(m)
+	}
+	r.run(8)
+	if !r.term.showing() {
+		t.Errorf("the old showing's messages took the new image down: %s, tail %q", r.term, tail(r.term.log.String()))
+	}
+}
+
+// TestGraphTabFramesInOrder: ticks replayed late, newest first, draw
+// nothing; frames reach the terminal in the order they were made.
+func TestGraphTabFramesInOrder(t *testing.T) {
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	var seen []tea.Msg
+	for range 4 {
+		ticks := take[graphTick](r)
+		seen = append(seen, ticks...)
+		for _, m := range ticks {
+			r.deliver(m)
+		}
+	}
+	if len(seen) < 3 {
+		t.Fatalf("only %d ticks: the fixture should animate", len(seen))
+	}
+	before := len(r.term.seqs)
+	for i := len(seen) - 1; i >= 0; i-- {
+		r.deliver(seen[i])
+	}
+	if got := len(r.term.seqs) - before; got != 0 {
+		t.Errorf("%d frames drawn by ticks already used", got)
+	}
+	for i := 1; i < len(r.term.seqs); i++ {
+		if r.term.seqs[i] <= r.term.seqs[i-1] {
+			t.Fatalf("frames reached the terminal out of order: %v", r.term.seqs)
+		}
+	}
+	if !r.term.showing() {
+		t.Errorf("after replayed ticks: %s", r.term)
+	}
+}
+
+func tail(s string) string { return s[max(0, len(s)-160):] }
+
+// idle is the crew fixture with every member idle: nothing animates, so
+// the image is drawn only when something changes.
+func idle(t *testing.T, term *fakeTerm) *rig {
+	t.Helper()
+	r := panelOn(t, "recorded-crew-lifecycle", &cellRecorder{w: cw, h: ch}, term)
+	return r
+}
+
+// TestGraphTabStaleTickKeepsRedraw: an idle Graph whose first tick is held
+// across a leave and a return must still draw the new showing.
+func TestGraphTabStaleTickKeepsRedraw(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		leave tea.Msg
+		back  tea.Msg
+	}{
+		{"leave and return", key("tab"), mustTab("graph")},
+		{"pause and resume", apc.Command{Verb: apc.Pause}, apc.Command{Verb: apc.Resume}},
+		{"resize", tea.WindowSizeMsg{Width: boardW, Height: boardH - 2}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := idle(t, newTerm())
+			r.deliver(mustTab("graph"))
+			r.run(2) // cellSize, settle
+			old := take[graphTick](r)
+			if len(old) != 1 {
+				t.Fatalf("held %d ticks after settling, want the first frame's", len(old))
+			}
+			r.deliver(c.leave)
+			if c.back != nil {
+				r.deliver(c.back)
+			}
+			fresh := r.held
+			r.held = nil
+			for _, m := range fresh {
+				if _, ok := m.(cellSize); ok {
+					r.deliver(m)
+				}
+			}
+			r.deliver(old[0])
+			for _, m := range fresh {
+				if _, ok := m.(cellSize); !ok {
+					r.deliver(m)
+				}
+			}
+			r.run(12)
+			if !r.term.showing() {
+				t.Errorf("idle Graph after a stale tick: %s", r.term)
+			}
+		})
+	}
+}
+
+func TestGraphTabStaleOutputCannotReachTerminal(t *testing.T) {
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	for _, m := range r.held {
+		if raw, ok := m.(tea.RawMsg); ok {
+			t.Errorf("graphics go through tea.Raw (%q): concurrent commands can reorder them", raw.Msg)
+		}
 	}
 }
 
 func TestGraphTabNoCellSizeNoImage(t *testing.T) {
-	g := newRig(t, graphPanel(t, &cellRecorder{err: errors.New("no size")}))
-	if out := g.send(mustTab("graph"), 12); out != "" {
+	r := panelOn(t, "edited-crew-attention", &cellRecorder{err: errors.New("no size")}, newTerm())
+	if out := r.send(mustTab("graph"), 12); out != "" {
 		t.Errorf("without a cell size the panel wrote %q", out)
 	}
-	if g.m.GraphRegion().H == 0 || !strings.Contains(plain(g.m.Frame()), "Live") {
+	if r.m.GraphRegion().H == 0 || !strings.Contains(plain(r.m.Frame()), "Live") {
 		t.Errorf("the Graph tab's text is gone")
 	}
-	if out := newRig(t, graphPanel(t, nil)).send(mustTab("graph"), 12); out != "" {
+	if out := panelOn(t, "edited-crew-attention", nil, newTerm()).send(mustTab("graph"), 12); out != "" {
 		t.Errorf("without Rex the panel wrote %q", out)
 	}
 }
 
+func TestGraphTabFailedMeasureDoesNotSpin(t *testing.T) {
+	ctl := &cellRecorder{err: errors.New("no size")}
+	r := panelOn(t, "edited-crew-attention", ctl, newTerm())
+	r.send(mustTab("graph"), 500)
+	if len(r.held) != 0 {
+		t.Errorf("%d messages still held after 500: a failed measure keeps asking", len(r.held))
+	}
+	if n := strings.Count(strings.Join(ctl.got(), " "), "cellsize"); n != 1 {
+		t.Errorf("asked the cell size %d times for one showing, want 1", n)
+	}
+	r.send(layer.State{Connected: false}, 20)
+	ctl.err, ctl.w, ctl.h = nil, cw, ch
+	r.send(layer.State{Connected: true}, 20)
+	if !r.term.showing() {
+		t.Errorf("the connection coming up did not measure and draw: %s", r.term)
+	}
+	off := panelOn(t, "edited-crew-attention", nil, newTerm())
+	off.send(mustTab("graph"), 500)
+	if len(off.held) != 0 {
+		t.Errorf("without Rex, %d messages still held after 500", len(off.held))
+	}
+}
+
 func TestGraphTabResizeRedraws(t *testing.T) {
-	g, _ := shown(t, &cellRecorder{w: cw, h: ch})
-	g.run(4) // let the animation settle into its loop
-	out := g.send(tea.WindowSizeMsg{Width: 100, Height: 30}, 12)
-	m := g.m
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	r.run(4)
+	out := r.send(tea.WindowSizeMsg{Width: 100, Height: 30}, 12)
 	tx := transmitRE.FindStringSubmatch(out)
 	if tx == nil {
 		t.Fatalf("resize wrote %q, want a new frame", out)
 	}
-	if r := m.GraphRegion(); tx[3] != fmt.Sprint(r.W*cw) || tx[4] != fmt.Sprint(r.H*ch) {
-		t.Errorf("frame %sx%s after resize, want %dx%d", tx[3], tx[4], r.W*cw, r.H*ch)
+	if reg := r.m.GraphRegion(); tx[3] != strconv.Itoa(reg.W*cw) || tx[4] != strconv.Itoa(reg.H*ch) {
+		t.Errorf("frame %sx%s after resize, want %dx%d", tx[3], tx[4], reg.W*cw, reg.H*ch)
 	}
-	if first := firstFrame(out); !strings.Contains(first, "\x1b\\\x1b8\x1b_Ga=d,d=I,i=") {
-		t.Errorf("resize frame %q: want the new image up, then the old one deleted", first)
+	if !r.term.showing() {
+		t.Errorf("after resize: %s", r.term)
+	}
+}
+
+// TestGraphTabUnreadFramesBounded: a terminal that never reads frame files
+// costs at most kitty.MaxUnread of them and says so; one that reads keeps
+// none behind.
+func TestGraphTabUnreadFramesBounded(t *testing.T) {
+	stuck := newTerm()
+	stuck.reads = false
+	r := panelOn(t, "edited-crew-attention", &cellRecorder{w: cw, h: ch}, stuck)
+	r.send(mustTab("graph"), 40)
+	dir := r.m.deps.Graphics.Dir
+	files, _ := filepath.Glob(filepath.Join(dir, "*.rgba"))
+	if len(files) != kitty.MaxUnread {
+		t.Errorf("%d frame files with a terminal that never reads, want %d", len(files), kitty.MaxUnread)
+	}
+	if !strings.Contains(r.m.hint, "not read") || !r.m.hintBad {
+		t.Errorf("hint %q: the stalled image must be visible as a failure", r.m.hint)
+	}
+	for _, f := range files {
+		os.Remove(f)
+	}
+	before := len(stuck.seqs)
+	r.run(6)
+	if len(stuck.seqs) == before {
+		t.Errorf("no frame after the terminal caught up")
+	}
+
+	r = shown(t, &cellRecorder{w: cw, h: ch})
+	r.run(40)
+	if files, _ := filepath.Glob(filepath.Join(r.m.deps.Graphics.Dir, "*.rgba")); len(files) != 0 {
+		t.Errorf("a reading terminal left %d frame files", len(files))
 	}
 }
 
 // nodeClick is a left click on the center of node id, in block pixels.
 func nodeClick(t *testing.T, m Model, id string) tea.MouseClickMsg {
 	t.Helper()
-	r := m.GraphRegion()
+	reg := m.GraphRegion()
 	for _, n := range m.gfx.scene.Nodes {
 		if n.ID == id {
 			c := n.Rect.Center()
-			return tea.MouseClickMsg{X: r.X*cw + int(c.X), Y: r.Y*ch + int(c.Y), Button: tea.MouseLeft}
+			return tea.MouseClickMsg{X: reg.X*cw + int(c.X), Y: reg.Y*ch + int(c.Y), Button: tea.MouseLeft}
 		}
 	}
 	t.Fatalf("no node %s in the last frame", id)
 	return tea.MouseClickMsg{}
-}
-
-func TestGraphTabClickSelectsThenFocuses(t *testing.T) {
-	ctl := &cellRecorder{w: cw, h: ch}
-	g, _ := shown(t, ctl)
-	out := g.send(nodeClick(t, g.m, "claude-02"), 12)
-	if h := g.m.memberHandle(g.m.sel[TabMembers]); h != "claude-02" {
-		t.Errorf("click selected member %q, want claude-02", h)
-	}
-	if !nodeSelected(g.m, "claude-02") || transmitRE.FindString(out) == "" {
-		t.Errorf("the frame after the click does not show claude-02 selected (%q)", out)
-	}
-	if strings.Contains(strings.Join(ctl.got(), " "), "jump") {
-		t.Fatalf("the first click jumped: %v", ctl.got())
-	}
-	r := g.m.GraphRegion()
-	g.send(tea.MouseClickMsg{X: r.X*cw + 1, Y: r.Y*ch + 1, Button: tea.MouseLeft}, 6)
-	if !nodeSelected(g.m, "claude-02") || g.m.gfx.selected != "claude-02" {
-		t.Errorf("a click on empty space changed the selection")
-	}
-	// A retired member has no pane: the second click says so and stays.
-	g.send(nodeClick(t, g.m, "codex-03"), 6)
-	g.send(nodeClick(t, g.m, "codex-03"), 6)
-	if g.m.Paused() || !strings.Contains(g.m.hint, "codex-03 has no pane") {
-		t.Errorf("second click on a member without a pane: paused %v hint %q", g.m.Paused(), g.m.hint)
-	}
-	g.send(nodeClick(t, g.m, "claude-02"), 6)
-	out = g.send(nodeClick(t, g.m, "claude-02"), 12)
-	if got := strings.Join(ctl.got(), " "); !strings.Contains(got, "jump block:claude-02") {
-		t.Fatalf("second click: calls %v, want a jump to claude-02's pane", ctl.got())
-	}
-	if !g.m.Paused() || !strings.Contains(out, "a=d,d=A") {
-		t.Errorf("after the jump the panel should pause and clear its image: paused %v, out %q", g.m.Paused(), out)
-	}
 }
 
 func nodeSelected(m Model, id string) bool {
@@ -306,25 +515,58 @@ func nodeSelected(m Model, id string) bool {
 	return false
 }
 
+func TestGraphTabClickSelectsThenFocuses(t *testing.T) {
+	ctl := &cellRecorder{w: cw, h: ch}
+	r := shown(t, ctl)
+	out := r.send(nodeClick(t, r.m, "claude-02"), 12)
+	if h := r.m.memberHandle(r.m.sel[TabMembers]); h != "claude-02" {
+		t.Errorf("click selected member %q, want claude-02", h)
+	}
+	if !nodeSelected(r.m, "claude-02") || transmitRE.FindString(out) == "" {
+		t.Errorf("the frame after the click does not show claude-02 selected (%q)", out)
+	}
+	if strings.Contains(strings.Join(ctl.got(), " "), "jump") {
+		t.Fatalf("the first click jumped: %v", ctl.got())
+	}
+	reg := r.m.GraphRegion()
+	r.send(tea.MouseClickMsg{X: reg.X*cw + 1, Y: reg.Y*ch + 1, Button: tea.MouseLeft}, 6)
+	if r.m.gfx.selected != "claude-02" {
+		t.Errorf("a click on empty space changed the selection")
+	}
+	r.send(nodeClick(t, r.m, "codex-03"), 6)
+	r.send(nodeClick(t, r.m, "codex-03"), 6)
+	if r.m.Paused() || !strings.Contains(r.m.hint, "codex-03 has no pane") {
+		t.Errorf("second click on a member without a pane: paused %v hint %q", r.m.Paused(), r.m.hint)
+	}
+	r.send(nodeClick(t, r.m, "claude-02"), 6)
+	r.send(nodeClick(t, r.m, "claude-02"), 12)
+	if got := strings.Join(ctl.got(), " "); !strings.Contains(got, "jump block:claude-02") {
+		t.Fatalf("second click: calls %v, want a jump to claude-02's pane", ctl.got())
+	}
+	if !r.m.Paused() || !r.term.blank() {
+		t.Errorf("after the jump the panel should pause and clear its image: paused %v, %s", r.m.Paused(), r.term)
+	}
+}
+
 func TestGraphTabReplayKeysDriveImage(t *testing.T) {
-	g, _ := shown(t, &cellRecorder{w: cw, h: ch})
+	r := shown(t, &cellRecorder{w: cw, h: ch})
 	total := func() int {
 		n := 0
-		for _, e := range g.m.gfx.scene.Edges {
+		for _, e := range r.m.gfx.scene.Edges {
 			n += e.Count
 		}
 		return n
 	}
 	live := total()
-	msgs := g.m.graphMessages()
+	msgs := r.m.graphMessages()
 	last := msgs[len(msgs)-1]
-	if out := g.send(key("["), 12); transmitRE.FindString(out) == "" {
+	if out := r.send(key("["), 12); transmitRE.FindString(out) == "" {
 		t.Fatalf("[ wrote %q, want a new frame", out)
 	}
 	if got := total(); got != live-len(last.To) {
-		t.Errorf("after [ the image counts %d messages per recipient, want %d (live %d less the last message's %d recipients)", got, live-len(last.To), live, len(last.To))
+		t.Errorf("after [ the image counts %d messages per recipient, want %d", got, live-len(last.To))
 	}
-	g.send(key("L"), 12)
+	r.send(key("L"), 12)
 	if got := total(); got != live {
 		t.Errorf("after L the image counts %d, want %d", got, live)
 	}
@@ -361,57 +603,36 @@ func TestGraphTabLegendColoursMatchStrokes(t *testing.T) {
 }
 
 func TestGraphTabCloseGraphics(t *testing.T) {
-	g, _ := shown(t, &cellRecorder{w: cw, h: ch})
-	m := g.m
-	seq, err := m.CloseGraphics()
-	if err != nil || seq != string(kitty.NewTransport("", 0).ClearAll())+pixelmouse.Disable {
-		t.Errorf("CloseGraphics = %q, %v; want ClearAll and mouse off", seq, err)
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	before := r.term.log.Len()
+	if err := r.m.CloseGraphics(); err != nil || r.term.log.String()[before:] != clearOff || !r.term.blank() {
+		t.Errorf("CloseGraphics: err %v, wrote %q; want ClearAll and mouse off", err, r.term.log.String()[before:])
 	}
-	if files, _ := filepath.Glob(filepath.Join(m.deps.Graphics.Dir, "*.rgba")); len(files) != 0 {
+	if files, _ := filepath.Glob(filepath.Join(r.m.deps.Graphics.Dir, "*.rgba")); len(files) != 0 {
 		t.Errorf("frame files left: %v", files)
 	}
-	idle := graphPanel(t, &cellRecorder{w: cw, h: ch})
-	if seq, err := idle.CloseGraphics(); seq != "" || err != nil {
-		t.Errorf("CloseGraphics with nothing shown = %q, %v; want nothing (no APC on a panel that never drew)", seq, err)
+	idleTerm := newTerm()
+	if err := panelOn(t, "edited-crew-attention", &cellRecorder{w: cw, h: ch}, idleTerm).m.CloseGraphics(); err != nil || idleTerm.log.Len() != 0 {
+		t.Errorf("CloseGraphics with nothing shown: err %v, wrote %q (no APC on a panel that never drew)", err, idleTerm.log.String())
 	}
-	if seq, err := build(t, "edited-crew-attention", boardW, boardH, Deps{}, Options{}).CloseGraphics(); seq != "" || err != nil {
-		t.Errorf("CloseGraphics without graphics = %q, %v", seq, err)
-	}
-}
-
-func TestGraphTabFailedMeasureDoesNotSpin(t *testing.T) {
-	ctl := &cellRecorder{err: errors.New("no size")}
-	g := newRig(t, graphPanel(t, ctl))
-	g.send(mustTab("graph"), 500)
-	if len(g.pending) != 0 {
-		t.Errorf("%d commands still pending after 500 messages: a failed measure keeps asking", len(g.pending))
-	}
-	if n := strings.Count(strings.Join(ctl.got(), " "), "cellsize"); n != 1 {
-		t.Errorf("asked the cell size %d times for one showing, want 1", n)
-	}
-	// A new trigger asks again: the connection coming up.
-	g.send(layer.State{Connected: false}, 20)
-	ctl.err, ctl.w, ctl.h = nil, cw, ch
-	if out := g.send(layer.State{Connected: true}, 20); transmitRE.FindString(out) == "" {
-		t.Errorf("the connection coming up did not measure and draw: %q", out)
-	}
-
-	off := newRig(t, graphPanel(t, nil))
-	off.send(mustTab("graph"), 500)
-	if len(off.pending) != 0 {
-		t.Errorf("without Rex, %d commands still pending after 500 messages", len(off.pending))
+	if err := build(t, "edited-crew-attention", boardW, boardH, Deps{}, Options{}).CloseGraphics(); err != nil {
+		t.Errorf("CloseGraphics without graphics: %v", err)
 	}
 }
 
-// BenchmarkGraphTabFrame is one wired frame: scene, paint, and the frame
-// file, at a Board on a Retina display (23x49-pixel cells).
+// BenchmarkGraphTabFrame is one wired frame: scene, paint, frame file and
+// command, at a Board on a Retina display (23x49-pixel cells), against a
+// terminal that reads every file.
 func BenchmarkGraphTabFrame(b *testing.B) {
 	now := time.Time(fixtures["edited-crew-attention"])
-	m := build(b, "edited-crew-attention", 98, 34, Deps{Clock: movingClock{&now}, Graphics: &Graphics{Dir: b.TempDir(), PID: 1}}, Options{})
+	m := build(b, "edited-crew-attention", 98, 34, Deps{Clock: movingClock{&now}, Graphics: &Graphics{Dir: b.TempDir(), PID: 1, Out: newTerm()}}, Options{})
 	m.gfx.cell = raster.Metrics{CellW: 23, CellH: 49}
 	for b.Loop() {
-		if m.draw() == "" {
-			b.Fatal("no frame")
+		if err := m.draw(); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
+
+var _ = graph.Size{}
+var _ = theme.Default

@@ -193,22 +193,11 @@ type heldSize tea.WindowSizeMsg
 // Filter is the program's message filter (tea.WithFilter): while the panel
 // is paused it keeps resizes from the renderer, which repaints on every
 // one, and hands them to the model, which passes the size on when it
-// resumes. It also drops Graph image output of a showing that has ended:
-// commands run concurrently, so a frame can reach the program after the
-// ClearAll that hid it.
+// resumes.
 func Filter(model tea.Model, msg tea.Msg) tea.Msg {
-	m, ok := model.(Model)
-	if !ok {
-		return msg
-	}
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		if m.paused {
-			return heldSize(msg)
-		}
-	case tea.RawMsg:
-		if g, ok := msg.Msg.(graphicsOut); ok && (m.gfx == nil || g.gen != m.gfx.gen) {
-			return nil
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		if m, ok := model.(Model); ok && m.paused {
+			return heldSize(size)
 		}
 	}
 	return msg

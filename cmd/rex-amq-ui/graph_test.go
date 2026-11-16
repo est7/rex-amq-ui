@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +83,42 @@ func nodeCenter(t *testing.T, fixture string, w, h int, id string) (int, int) {
 	return 0, 0
 }
 
+// kittyTerm is the panel's terminal output that reads each t=t frame
+// file as Kitty does (deleting it), so frames keep flowing.
+type kittyTerm struct{ syncBuffer }
+
+var framePath = regexp.MustCompile(`\x1b_Ga=T,[^;]*;([A-Za-z0-9+/=]+)\x1b\\`)
+
+func (k *kittyTerm) Write(p []byte) (int, error) {
+	for _, m := range framePath.FindAllSubmatch(p, -1) {
+		if path, err := base64.StdEncoding.DecodeString(string(m[1])); err == nil {
+			os.Remove(string(path))
+		}
+	}
+	return k.syncBuffer.Write(p)
+}
+
+var screenCmd = regexp.MustCompile(`\x1b_Ga=T,f=32,t=t,s=\d+,v=\d+,i=(\d),|\x1b_Ga=d,d=I,i=(\d),q=2\x1b\\|(\x1b_Ga=d,d=A,q=2\x1b\\)|\x1b\[\?(1016)([hl])`)
+
+// screen is what out leaves on the terminal: images up, and whether pixel
+// mouse reports are on.
+func screen(out string) (images int, pixelMouse bool) {
+	up := map[string]bool{}
+	for _, m := range screenCmd.FindAllStringSubmatch(out, -1) {
+		switch {
+		case m[1] != "":
+			up[m[1]] = true
+		case m[2] != "":
+			delete(up, m[2])
+		case m[3] != "":
+			clear(up)
+		case m[4] != "":
+			pixelMouse = m[5] == "h"
+		}
+	}
+	return len(up), pixelMouse
+}
+
 func methodsOf(s *rexctltest.Server) string {
 	var out []string
 	for _, r := range s.Requests() {
@@ -115,7 +153,7 @@ func TestGraphTabProgram(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer inW.Close()
-	out := &syncBuffer{}
+	out := &kittyTerm{}
 	errc := make(chan error, 1)
 	go func() {
 		errc <- runPanel(context.Background(), panelConfig{
@@ -159,10 +197,18 @@ func TestGraphTabProgram(t *testing.T) {
 	if m := methodsOf(rex); !strings.Contains(m, "session.set_layer_state session.focus_block") {
 		t.Errorf("calls %s: want minimize, then focus", m)
 	}
-	waitFor(t, "the image cleared as the panel hides", has("\x1b_Ga=d,d=A,q=2\x1b\\"+pixelmouse.Disable))
+	waitFor(t, "the image cleared as the panel hides", func() bool {
+		raw, _ := out.snapshot()
+		n, mouse := screen(raw)
+		return n == 0 && !mouse
+	})
 
+	_, n = out.snapshot()
 	inW.WriteString(apc.Encode(apc.Command{Verb: apc.Resume}))
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, "the image back on resume", func() bool {
+		raw, _ := out.snapshot()
+		return strings.Contains(raw[n:], "\x1b_Ga=T")
+	})
 	inW.WriteString("Q")
 	select {
 	case err := <-errc:
@@ -173,8 +219,8 @@ func TestGraphTabProgram(t *testing.T) {
 		t.Fatal("Q did not quit the panel")
 	}
 	raw, _ := out.snapshot()
-	if !strings.HasSuffix(raw, "\x1b_Ga=d,d=A,q=2\x1b\\"+pixelmouse.Disable) {
-		t.Errorf("output ends %q: quitting on the Graph tab must clear the image and turn pixel mouse off last", raw[max(0, len(raw)-80):])
+	if n, mouse := screen(raw); n != 0 || mouse {
+		t.Errorf("after quitting on the Graph tab: %d images up, pixel mouse %v; tail %q", n, mouse, raw[max(0, len(raw)-120):])
 	}
 	if left, _ := filepath.Glob(filepath.Join(frames, "*.rgba")); len(left) != 0 {
 		t.Errorf("frame files left after exit: %v", left)
