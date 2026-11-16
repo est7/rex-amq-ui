@@ -189,6 +189,9 @@ func (r *recorder) OpenBeside(_ context.Context, anchor, label string, argv []st
 	return r.note(fmt.Sprintf("beside %s %s %v", anchor, label, argv))
 }
 
+// CellSize reports no cell size: the Graph tab draws no image.
+func (r *recorder) CellSize(context.Context) (int, int, error) { return 0, 0, r.note("cellsize") }
+
 func (r *recorder) got() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

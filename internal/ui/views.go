@@ -434,7 +434,7 @@ func (m Model) graphView(c *canvas) {
 	}
 	c.add(Span{Text: " ──", Fg: p.Green}, Span{Text: " drained  ", Fg: p.Muted},
 		Span{Text: "━━", Fg: p.Yellow, Bold: true}, Span{Text: " obligation  ", Fg: p.Muted},
-		Span{Text: "┄┄", Fg: p.Faint}, Span{Text: " queued · bounced", Fg: p.Muted})
+		Span{Text: "┄", Fg: p.Blue}, Span{Text: "┄", Fg: p.Red}, Span{Text: " queued · bounced", Fg: p.Muted})
 	if at >= 0 {
 		cur := msgs[at]
 		c.add(Span{Text: " " + cur.From + " → " + recipients(cur), Fg: p.Fg}, Span{Text: " · " + cur.Subject, Fg: p.Muted})
