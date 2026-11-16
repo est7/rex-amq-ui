@@ -106,12 +106,17 @@ type Model struct {
 	askedOwner string
 	answered   bool
 
-	w, h    int
-	tab     Tab
-	tabSet  bool // the human or a command chose the tab
-	size    layer.Size
-	paused  bool
-	frozen  string // the frame on screen while paused
+	w, h   int
+	tab    Tab
+	tabSet bool // the human or a command chose the tab
+	size   layer.Size
+	paused bool
+	frozen string // the frame on screen while paused
+	// shown counts pauses and resumes. An action that leaves the panel
+	// records it when it starts and pauses the panel on success only if no
+	// pause or resume came in between: actions finish asynchronously, and
+	// one that ends after the panel came back must not hide it again.
+	shown   int
 	hint    string
 	hintBad bool
 
@@ -158,8 +163,10 @@ type actionDone struct {
 	what string
 	// leaves: the call minimized the panel on success.
 	leaves bool
-	size   *layer.Size
-	err    error
+	// shown is Model.shown when the call started.
+	shown int
+	size  *layer.Size
+	err   error
 }
 
 // Update folds msg into the model.
@@ -293,10 +300,16 @@ func (m *Model) pause() {
 	if !m.paused {
 		m.frozen = m.render()
 		m.paused = true
+		m.shown++
 	}
 }
 
-func (m *Model) resume() { m.paused, m.frozen = false, "" }
+func (m *Model) resume() {
+	if m.paused {
+		m.paused, m.frozen = false, ""
+		m.shown++
+	}
+}
 
 // Paused reports whether the panel has stopped drawing.
 func (m Model) Paused() bool { return m.paused }
@@ -306,11 +319,11 @@ func (m Model) act(what string, leaves bool, f func(context.Context, Controller)
 	if m.deps.Layer == nil {
 		return func() tea.Msg { return actionDone{what: what, err: layer.ErrDisconnected} }
 	}
-	ctl := m.deps.Layer
+	ctl, shown := m.deps.Layer, m.shown
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return actionDone{what: what, leaves: leaves, err: f(ctx, ctl)}
+		return actionDone{what: what, leaves: leaves, shown: shown, err: f(ctx, ctl)}
 	}
 }
 
@@ -337,7 +350,7 @@ func (m Model) done(d actionDone) (tea.Model, tea.Cmd) {
 	if d.size != nil {
 		m.size = *d.size
 	}
-	if d.leaves {
+	if d.leaves && d.shown == m.shown {
 		m.pause()
 	}
 	return m, nil

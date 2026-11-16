@@ -57,3 +57,26 @@ func TestReplayCursorSurvivesChanges(t *testing.T) {
 		}
 	})
 }
+
+func TestLateActionDoesNotRepause(t *testing.T) {
+	w, h := refSize(t, layer.Drawer)
+	rec := &recorder{}
+	m := build(t, "edited-crew-attention", w, h, Deps{Layer: rec}, Options{})
+	next, held := m.Update(key("q")) // minimize; its result arrives later
+	m = next.(Model)
+	m = step(t, m, layer.State{Connected: true, Minimized: true})
+	m = step(t, m, layer.State{Connected: true})
+	m = step(t, m, mustTab("overview"))
+	if m.Paused() {
+		t.Fatal("restored layer paused")
+	}
+	m = step(t, m, held())
+	if m.Paused() {
+		t.Fatal("the minimize that finished after the panel came back paused it again")
+	}
+	// A completion that is still current does pause it.
+	next, cmd := m.Update(key("q"))
+	if m = step(t, next.(Model), cmd()); !m.Paused() {
+		t.Fatal("a current minimize did not pause")
+	}
+}

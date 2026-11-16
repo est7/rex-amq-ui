@@ -25,7 +25,7 @@ func (m Model) openHandBack() tea.Cmd {
 	}
 	hb := *m.st.Panel.View.HandBack
 	session := m.st.Scope.SessionID
-	d, anchor := m.deps, m.lay.Focused
+	d, anchor, shown := m.deps, m.lay.Focused, m.shown
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -37,7 +37,7 @@ func (m Model) openHandBack() tea.Cmd {
 		if err == nil && d.Layer != nil {
 			err = d.Layer.Minimize(ctx)
 		}
-		return actionDone{what: "open hand-back", leaves: err == nil, err: err}
+		return actionDone{what: "open hand-back", leaves: err == nil, shown: shown, err: err}
 	}
 }
 
