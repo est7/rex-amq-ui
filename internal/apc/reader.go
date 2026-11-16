@@ -19,6 +19,11 @@ const EscWait = 40 * time.Millisecond
 // still puts the terminal in raw mode and restores it, and waits on its
 // descriptor before reading.
 //
+// Because the caller waits on the descriptor, a Read never reads more than
+// it can return: bytes it kept back would sit unseen until the next key.
+// The only bytes it keeps across Reads are the parser's (a sequence in
+// progress, or a lone ESC whose rest is already on the descriptor).
+//
 // Only one split can leak: a sequence whose first byte, ESC, arrives alone
 // and more than EscWait before the rest. Rex writes each sequence in one
 // write, so in practice it arrives whole.
@@ -31,10 +36,13 @@ type Reader struct {
 	// descriptor.
 	Wait func(d time.Duration) bool
 
-	p    Parser
-	buf  [4096]byte
-	left []byte // filtered bytes a short Read could not take
+	p   Parser
+	buf [4096]byte
 }
+
+// MinRead is the smallest buffer Read takes: room for the longest
+// sequence the parser may give back.
+const MinRead = 64
 
 // NewReader filters f, usually os.Stdin.
 func NewReader(f *os.File) *Reader { return &Reader{f: f} }
@@ -46,15 +54,21 @@ func (r *Reader) Close() error                { return r.f.Close() }
 
 // Read reads input with this channel's sequences taken out. It may return
 // no bytes and no error when a read held only a sequence, or part of one.
+// b must hold at least MinRead bytes.
 func (r *Reader) Read(b []byte) (int, error) {
-	if len(r.left) > 0 {
-		n := copy(b, r.left)
-		r.left = r.left[n:]
-		return n, nil
+	if len(b) < MinRead {
+		return 0, io.ErrShortBuffer
 	}
-	var out []byte
+	out := b[:0]
 	for {
-		n, err := r.f.Read(r.buf[:])
+		// What the parser holds may come out with what is read next.
+		room := min(len(b)-len(out)-r.p.Held(), len(r.buf))
+		if room <= 0 {
+			// b is full; a held ESC's rest is on the descriptor, so the
+			// caller's wait returns at once for the next Read.
+			return len(out), nil
+		}
+		n, err := r.f.Read(r.buf[:room])
 		pass, cmds := r.p.Feed(r.buf[:n])
 		out = append(out, pass...)
 		for _, c := range cmds {
@@ -66,22 +80,16 @@ func (r *Reader) Read(b []byte) (int, error) {
 			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 				out = append(out, r.p.Flush()...)
 			}
-			return r.give(b, out), err
+			return len(out), err
 		}
 		if !r.p.HoldsEsc() {
-			return r.give(b, out), nil
+			return len(out), nil
 		}
 		if !r.wait(EscWait) {
-			return r.give(b, append(out, r.p.Flush()...)), nil
+			return len(append(out, r.p.Flush()...)), nil
 		}
 		// More follows the ESC at once: read it before deciding.
 	}
-}
-
-func (r *Reader) give(b, out []byte) int {
-	n := copy(b, out)
-	r.left = append(r.left[:0], out[n:]...)
-	return n
 }
 
 func (r *Reader) wait(d time.Duration) bool {
