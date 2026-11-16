@@ -1,0 +1,2 @@
+{"schema":1,"stream":"55cca1dbcededb35","seq":1,"type":"snapshot","at":"2026-11-16T12:01:54.923923Z","scope":{"kind":"session","server":"unix:///tmp/fake-rex.sock","session_id":"session:00000000-0000-0000-0000-0000000000s1"},"agents":[],"messages":[],"panel":{"session_label":"rex-amq-ui","attention":{}}}
+{"schema":1,"stream":"55cca1dbcededb35","seq":2,"type":"heartbeat","at":"2026-11-16T12:01:59.925714Z"}
