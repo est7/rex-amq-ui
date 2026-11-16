@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,6 +43,12 @@ func (r *cellRecorder) CellSize(context.Context) (int, int, error) {
 // does; a file already gone loads no image.
 type fakeTerm struct {
 	reads bool
+	// cut, when set, takes the next write's first cut(p) bytes and fails
+	// it (once); dead fails every write from then on.
+	cut  func([]byte) int
+	dead bool
+	// cutAt is where in log the last cut write ended.
+	cutAt int
 	log   strings.Builder
 	// images are the placed image ids, each with the frame file number it
 	// shows; mouse the mouse modes on.
@@ -60,6 +67,16 @@ var termCmd = regexp.MustCompile(`\x1b_Ga=T,f=32,t=t,s=\d+,v=\d+,i=(\d),p=1,C=1,
 var frameNo = regexp.MustCompile(`-(\d+)\.rgba$`)
 
 func (f *fakeTerm) Write(p []byte) (int, error) {
+	if f.dead {
+		return 0, errors.New("terminal gone")
+	}
+	var err error
+	if f.cut != nil {
+		n := min(f.cut(p), len(p))
+		f.cut = nil
+		p, err = p[:n], io.ErrUnexpectedEOF
+		defer func() { f.cutAt = f.log.Len() }()
+	}
 	f.log.Write(p)
 	for _, m := range termCmd.FindAllStringSubmatch(string(p), -1) {
 		switch {
@@ -85,7 +102,7 @@ func (f *fakeTerm) Write(p []byte) (int, error) {
 			f.mouse[m[5]] = m[6] == "h"
 		}
 	}
-	return len(p), nil
+	return len(p), err
 }
 
 // showing reports whether exactly one image is up with pixel mouse on;
@@ -636,3 +653,71 @@ func BenchmarkGraphTabFrame(b *testing.B) {
 
 var _ = graph.Size{}
 var _ = theme.Default
+
+// afterTransmit cuts a frame's write right after its a=T command: the
+// terminal has the image, not the cursor restore or the old image's
+// delete.
+func afterTransmit(p []byte) int {
+	if i := strings.Index(string(p), "\x1b\\\x1b8"); i >= 0 {
+		return i + 2
+	}
+	return len(p)
+}
+
+// TestGraphTabPartialWriteStillTornDown: a write the terminal took only
+// part of may have put an image or a mouse mode up; leaving and exiting
+// must still clear both, after resetting the terminal's parser.
+func TestGraphTabPartialWriteStillTornDown(t *testing.T) {
+	t.Run("frame cut after its image", func(t *testing.T) {
+		r := shown(t, &cellRecorder{w: cw, h: ch})
+		r.term.cut = afterTransmit
+		r.send(nodeClick(t, r.m, "claude-02"), 3) // a change: the next frame is cut
+		if r.term.cut != nil {
+			t.Fatal("no frame was written after the click")
+		}
+		out := r.send(key("tab"), 6)
+		if !r.term.blank() {
+			t.Fatalf("after a cut frame and leaving: %s, wrote %q", r.term, out)
+		}
+		if next := r.term.log.String()[r.term.cutAt:]; !strings.HasPrefix(next, resetParser) {
+			t.Errorf("the first write after a cut one %q: want CAN ST first, ending any half-sent sequence", next[:min(len(next), 40)])
+		}
+	})
+	t.Run("first frame cut, then exit", func(t *testing.T) {
+		term := newTerm()
+		term.cut = func(p []byte) int {
+			if strings.Contains(string(p), "a=T") {
+				return afterTransmit(p)
+			}
+			return len(p) + 1
+		}
+		r := panelOn(t, "edited-crew-attention", &cellRecorder{w: cw, h: ch}, term)
+		r.send(mustTab("graph"), 4)
+		if len(term.images) == 0 {
+			t.Fatalf("the cut frame did not reach the terminal: %s", term)
+		}
+		if err := r.m.CloseGraphics(); err != nil || !term.blank() {
+			t.Errorf("CloseGraphics after a cut first frame: %v, %s", err, term)
+		}
+	})
+	t.Run("mouse enable cut", func(t *testing.T) {
+		term := newTerm()
+		term.cut = func(p []byte) int { return len("\x1b[?1002h") }
+		r := panelOn(t, "recorded-crew-lifecycle", &cellRecorder{w: cw, h: ch}, term)
+		r.send(mustTab("graph"), 4)
+		if !term.mouse["1002"] {
+			t.Fatalf("the cut enable did not reach the terminal")
+		}
+		r.send(key("tab"), 4)
+		if !term.blank() {
+			t.Errorf("leaving after a cut mouse enable: %s, log %q", term, term.log.String())
+		}
+	})
+	t.Run("terminal gone: exit reports it", func(t *testing.T) {
+		r := shown(t, &cellRecorder{w: cw, h: ch})
+		r.term.dead = true
+		if err := r.m.CloseGraphics(); err == nil {
+			t.Errorf("CloseGraphics with an unwritable terminal and an image up returned nil")
+		}
+	})
+}

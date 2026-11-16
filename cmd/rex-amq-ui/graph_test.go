@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -224,5 +225,107 @@ func TestGraphTabProgram(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(frames, "*.rgba")); len(left) != 0 {
 		t.Errorf("frame files left after exit: %v", left)
+	}
+}
+
+type panicNow struct{}
+
+// panicky is the panel with a fault: it panics on panicNow.
+type panicky struct{ tea.Model }
+
+func (p panicky) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(panicNow); ok {
+		panic("injected fault")
+	}
+	m, cmd := p.Model.Update(msg)
+	return panicky{m}, cmd
+}
+
+// TestGraphTabProgramPanicCleansUp: a panic in Update after the image is
+// up ends the panel with the panic as its error, the image cleared, pixel
+// mouse off and no frame files left.
+func TestGraphTabProgramPanicCleansUp(t *testing.T) {
+	if raceDetector {
+		// Bubble Tea v2.1.1 closes its cancel reader on a panic shutdown
+		// without waiting for the read loop (tea.go:1304 against
+		// cancelreader_bsd.go:141): -race flags it about once in ten runs.
+		// The panel's own part, endPanel, is covered under -race by
+		// TestGraphTabEndPanelKeepsPanic. Remove this skip when Bubble Tea
+		// waits for its read loop before closing on a panic.
+		t.Skip("Bubble Tea's panic shutdown races its input reader under -race")
+	}
+	dir := t.TempDir()
+	fixture, err := filepath.Abs(filepath.Join("..", "..", "testdata", "panel", "edited-crew-attention.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "rex-amq-adapter")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat '"+fixture+"'\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	frames := filepath.Join(dir, "frames")
+	if err := os.Mkdir(frames, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rex := graphRex(t)
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inW.Close()
+	out := &syncBuffer{} // reads no frame file: one stays behind unless cleaned up
+	errc := make(chan error, 1)
+	progc := make(chan *tea.Program, 1)
+	go func() {
+		errc <- runPanel(context.Background(), panelConfig{
+			Server: rex.URL, Session: gSession, Block: gPanel, AdapterBin: script, In: inR, Out: out,
+			Width: 120, Height: 40, Options: ui.Options{Tab: "graph"},
+			Graphics: &ui.Graphics{Dir: frames, PID: 4343},
+			started:  func(p *tea.Program) { progc <- p },
+			wrap:     func(m tea.Model) tea.Model { return panicky{m} },
+		})
+	}()
+	prog := <-progc
+	waitFor(t, "the Kitty frame", func() bool { raw, _ := out.snapshot(); return strings.Contains(raw, "\x1b_Ga=T") })
+	prog.Send(panicNow{})
+	select {
+	case err := <-errc:
+		if !errors.Is(err, tea.ErrProgramPanic) {
+			t.Errorf("panel ended with %v, want the panic (tea.ErrProgramPanic)", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the panic did not end the panel")
+	}
+	raw, _ := out.snapshot()
+	if n, mouse := screen(raw); n != 0 || mouse {
+		t.Errorf("after the panic: %d images up, pixel mouse %v", n, mouse)
+	}
+	if left, _ := filepath.Glob(filepath.Join(frames, "*.rgba")); len(left) != 0 {
+		t.Errorf("frame files left after the panic: %v", left)
+	}
+}
+
+func TestGraphTabEndPanelKeepsPanic(t *testing.T) {
+	live := context.Background()
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	m := ui.New(ui.Deps{}, ui.Options{})
+	panicked := fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrProgramPanic)
+	for _, c := range []struct {
+		name   string
+		parent context.Context
+		err    error
+		want   error
+	}{
+		{"panic, caller still running", live, panicked, tea.ErrProgramPanic},
+		{"panic while the caller cancels", gone, panicked, tea.ErrProgramPanic},
+		{"killed by the caller's cancellation", gone, tea.ErrProgramKilled, nil},
+		{"killed with the caller running", live, tea.ErrProgramKilled, tea.ErrProgramKilled},
+		{"quit", live, nil, nil},
+	} {
+		got := endPanel(c.parent, c.err, m)
+		if (c.want == nil) != (got == nil) || (c.want != nil && !errors.Is(got, c.want)) {
+			t.Errorf("%s: endPanel = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

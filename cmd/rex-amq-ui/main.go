@@ -110,11 +110,13 @@ type panelConfig struct {
 	Graphics *ui.Graphics
 	// started, when set, is given the program before it runs (tests).
 	started func(*tea.Program)
+	// wrap, when set, wraps the panel's model (tests: inject a fault).
+	wrap func(tea.Model) tea.Model
 }
 
 // runPanel runs the panel until the human quits it (Q).
-func runPanel(ctx context.Context, cfg panelConfig) error {
-	ctx, cancel := context.WithCancel(ctx)
+func runPanel(parent context.Context, cfg panelConfig) error {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	// Outside Rex (no server or session) the panel still shows the stream;
@@ -151,7 +153,11 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 	if cfg.Width > 0 && cfg.Height > 0 {
 		opts = append(opts, tea.WithWindowSize(cfg.Width, cfg.Height))
 	}
-	prog := tea.NewProgram(model, opts...)
+	var root tea.Model = model
+	if cfg.wrap != nil {
+		root = cfg.wrap(model)
+	}
+	prog := tea.NewProgram(root, opts...)
 	in.On = func(c apc.Command) { prog.Send(c) }
 	if cfg.started != nil {
 		cfg.started(prog)
@@ -162,18 +168,24 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 	if panel != nil {
 		wg.Go(func() { panel.Watch(ctx, func(s layer.State) { prog.Send(s) }) })
 	}
-	final, err := prog.Run()
+	_, err := prog.Run()
 	cancel()
 	wg.Wait()
-	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
+	return endPanel(parent, err, model)
+}
+
+// endPanel is the panel's result once Run returned err. Only the caller's
+// cancellation (parent ended) ends it normally; a panic, which Run reports
+// as killed too, stays an error. The Graph image and pixel mouse reports
+// outlive the program's own terminal reset, so it clears them and the
+// unread frame files through model, the model as built: it shares its
+// graphics with every later copy, so this holds when Run returned no
+// model, after a panic.
+func endPanel(parent context.Context, err error, model ui.Model) error {
+	if errors.Is(err, tea.ErrProgramKilled) && !errors.Is(err, tea.ErrProgramPanic) && parent.Err() != nil {
 		err = nil
 	}
-	if m, ok := final.(ui.Model); ok {
-		// The Graph image and pixel mouse reports outlive the program's
-		// own terminal reset: clear them, and the unread frame files.
-		err = errors.Join(err, m.CloseGraphics())
-	}
-	return err
+	return errors.Join(err, model.CloseGraphics())
 }
 
 // lockedWriter serializes writes to one terminal from the renderer and

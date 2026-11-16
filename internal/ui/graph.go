@@ -41,9 +41,10 @@ const settleDelay = 50 * time.Millisecond
 // changes it (Bubble Tea runs Update on one goroutine); the commands it
 // returns carry values, never the pointer.
 //
-// What it believes the terminal shows (an image, pixel mouse reports)
-// changes only after the write that does it succeeded; a failed teardown
-// is tried again on the next Update.
+// What it believes the terminal shows (an image, pixel mouse reports) is
+// conservative: on as soon as any byte that may turn it on went out, off
+// only after the write that turns it off succeeded; a failed teardown is
+// tried again on the next Update.
 type graphTab struct {
 	out    io.Writer
 	g      *graph.Model
@@ -90,8 +91,41 @@ const (
 	drawing
 )
 
+// screen is the terminal as the Graph tab writes to it. A write cut short
+// may leave the terminal's parser inside an escape sequence, so the next
+// write first sends CAN, which aborts a control sequence, and ST, which
+// ends a string such as an APC; both are no-ops otherwise. A short write
+// with no error is io.ErrShortWrite.
+type screen struct {
+	w    io.Writer
+	torn bool
+}
+
+const resetParser = "\x18\x1b\\"
+
+func (s *screen) Write(p []byte) (int, error) {
+	if s.torn {
+		n, err := io.WriteString(s.w, resetParser)
+		if err == nil && n < len(resetParser) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return 0, err
+		}
+		s.torn = false
+	}
+	n, err := s.w.Write(p)
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil && n > 0 {
+		s.torn = true
+	}
+	return n, err
+}
+
 func newGraphTab(g Graphics, clock Clock) *graphTab {
-	return &graphTab{out: g.Out, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(30)}
+	return &graphTab{out: &screen{w: g.Out}, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(30)}
 }
 
 // NeedsAnimation makes graphTab the scheduler's Animator: a frame is due
@@ -218,7 +252,7 @@ func (m *Model) hideImage() {
 	}
 	if gt.mouse {
 		if _, err := io.WriteString(gt.out, pixelmouse.Disable); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("pixel mouse off: %w", err))
 		} else {
 			gt.mouse = false
 		}
@@ -276,6 +310,11 @@ func (m *Model) frame(t kitty.Tick) tea.Cmd {
 // terminal, switching pixel mouse reports on before the first.
 func (m *Model) draw() error {
 	gt := m.gfx
+	if !gt.tr.Room() {
+		// The terminal has not read the last frames: painting one now
+		// would be thrown away.
+		return kitty.ErrBacklog
+	}
 	r := m.GraphRegion()
 	sz := graph.Size{Cols: r.W, Rows: r.H, Cell: gt.cell}
 	w, h := sz.Pixels()
@@ -285,10 +324,13 @@ func (m *Model) draw() error {
 	gt.scene = gt.g.Scene(sz)
 	graph.Paint(gt.canvas, gt.scene, graph.FromTheme(m.pal))
 	if !gt.mouse {
-		if _, err := io.WriteString(gt.out, pixelmouse.Enable); err != nil {
-			return err
+		// Any byte of it may have turned a mode on: owe the off from the
+		// first byte, not from success.
+		n, err := io.WriteString(gt.out, pixelmouse.Enable)
+		gt.mouse = n > 0
+		if err != nil {
+			return fmt.Errorf("pixel mouse on: %w", err)
 		}
-		gt.mouse = true
 	}
 	return gt.tr.Show(gt.out, gt.canvas.Image(), kitty.Cell{Col: r.X, Row: r.Y})
 }
@@ -337,9 +379,11 @@ func (m *Model) click(c tea.MouseClickMsg) tea.Cmd {
 }
 
 // CloseGraphics runs when the panel exits: it deletes the image and turns
-// pixel mouse reports off if they are on, writing to the terminal after
+// pixel mouse reports off if they may be on, writing to the terminal after
 // the program's own reset, and removes the frame files the terminal has
-// not read.
+// not read. Every copy of a Model shares its graphics, so any copy (the
+// one the program started with, when a panic left no final one) closes
+// them. It reports an error while a teardown could not be written.
 func (m Model) CloseGraphics() error {
 	if m.gfx == nil {
 		return nil
