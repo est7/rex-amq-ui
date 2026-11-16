@@ -374,3 +374,47 @@ func TestWatchMakesTheFirstConnection(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenBesideClosesABlockItCouldNotPlace(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	s.SetView(view(5, panel, true, "", "client:app", Drawer.Bounds()))
+	const made = "block:01a1e4ff-0000-7000-8000-0000000000ed"
+	s.Handle("session.new_block", func(rexctltest.Request) (any, *rexctltest.Error) {
+		return map[string]any{"block_id": made, "revision": 5}, nil
+	})
+	s.Handle("session.move_block", func(rexctltest.Request) (any, *rexctltest.Error) {
+		return nil, &rexctltest.Error{Code: "not_found", Message: "no anchor block", Status: 404}
+	})
+	closed := make(chan string, 1)
+	s.Handle("block.close", func(r rexctltest.Request) (any, *rexctltest.Error) {
+		var p struct {
+			BlockID string `json:"block_id"`
+		}
+		r.Decode(&p)
+		closed <- p.BlockID
+		return map[string]any{"revision": 6}, nil
+	})
+	p, err := Connect(context.Background(), s.URL, sess, panel, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The caller's context is already done when placement fails: cleanup
+	// must not depend on it.
+	ctx, cancel := context.WithCancel(context.Background())
+	s.Handle("session.move_block", func(rexctltest.Request) (any, *rexctltest.Error) {
+		cancel()
+		return nil, &rexctltest.Error{Code: "not_found", Message: "no anchor block", Status: 404}
+	})
+	err = p.OpenBeside(ctx, "block:gone", "hand-back", []string{"nvim", "/tmp/x.md"})
+	if !rexctl.IsCode(err, rexctl.CodeNotFound) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v: the placement failure must be reported", err)
+	}
+	select {
+	case got := <-closed:
+		if got != made {
+			t.Fatalf("closed %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the unplaced block was left running")
+	}
+}
