@@ -34,6 +34,8 @@ type Controller interface {
 	SwitchTo(ctx context.Context, session string) error
 	// OpenBeside runs argv in a new pane split in before anchor.
 	OpenBeside(ctx context.Context, anchor, label string, argv []string) error
+	// CellSize is the pixel size of one cell of the panel's terminal.
+	CellSize(ctx context.Context) (w, h int, err error)
 }
 
 // Clock is the time relative times are measured from.
@@ -58,6 +60,9 @@ type Deps struct {
 	CacheDir string
 	// Editor is $EDITOR, the fallback viewer.
 	Editor string
+	// Graphics, when set, draws the Graph tab's image with Kitty graphics;
+	// without it the region stays background.
+	Graphics *Graphics
 }
 
 // Options are the panel's starting state.
@@ -135,6 +140,8 @@ type Model struct {
 	// list is Live.
 	graphAt     string
 	hideRetired bool
+	// gfx is the Graph tab's image; nil without Deps.Graphics.
+	gfx *graphTab
 }
 
 type mailState struct {
@@ -154,6 +161,9 @@ func New(d Deps, o Options) Model {
 		mail: mailState{follow: true, expanded: map[string]bool{}}}
 	m.lay.Focused = o.Focused
 	m.lay.Size = o.Size
+	if d.Graphics != nil {
+		m.gfx = newGraphTab(*d.Graphics, d.Clock)
+	}
 	m.tab = TabOverview
 	if t, ok := tabNamed(o.Tab); ok {
 		m.tab, m.tabSet = t, true
@@ -181,11 +191,22 @@ type heldSize tea.WindowSizeMsg
 // Filter is the program's message filter (tea.WithFilter): while the panel
 // is paused it keeps resizes from the renderer, which repaints on every
 // one, and hands them to the model, which passes the size on when it
-// resumes.
+// resumes. It also drops Graph image output of a showing that has ended:
+// commands run concurrently, so a frame can reach the program after the
+// ClearAll that hid it.
 func Filter(model tea.Model, msg tea.Msg) tea.Msg {
-	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		if m, ok := model.(Model); ok && m.paused {
-			return heldSize(size)
+	m, ok := model.(Model)
+	if !ok {
+		return msg
+	}
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if m.paused {
+			return heldSize(msg)
+		}
+	case tea.RawMsg:
+		if g, ok := msg.Msg.(graphicsOut); ok && (m.gfx == nil || g.gen != m.gfx.gen) {
+			return nil
 		}
 	}
 	return msg
@@ -199,6 +220,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		n.sizeHeld = false
 		size := tea.WindowSizeMsg{Width: n.w, Height: n.h}
 		cmd = tea.Batch(cmd, func() tea.Msg { return size })
+	}
+	if n.gfx != nil {
+		cmd = tea.Batch(cmd, n.graphics(msg))
 	}
 	return n, cmd
 }

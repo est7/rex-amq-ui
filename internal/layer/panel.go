@@ -330,3 +330,22 @@ func (p *Panel) apply(ctx context.Context, c *rexctl.Client, e rexctl.Event) boo
 	}
 	return true
 }
+
+// CellSize is the pixel size of one cell of the panel's terminal, as its
+// block reports it. It is the only true measure: before an app owns the
+// block, Rex answers CSI 16 t with a synthetic 8x16.
+func (p *Panel) CellSize(ctx context.Context) (w, h int, err error) {
+	c, _, err := p.client()
+	if err != nil {
+		return 0, 0, err
+	}
+	block := p.Block()
+	ts, err := c.TerminalSize(ctx, p.session, block)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ts.CellWidthPx <= 0 || ts.CellHeightPx <= 0 {
+		return 0, 0, fmt.Errorf("layer: block %s reports no cell size", block)
+	}
+	return ts.CellWidthPx, ts.CellHeightPx, nil
+}

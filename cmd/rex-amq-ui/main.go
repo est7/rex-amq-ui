@@ -28,6 +28,7 @@ import (
 
 	"github.com/est7/rex-amq-ui/internal/adapter"
 	"github.com/est7/rex-amq-ui/internal/apc"
+	"github.com/est7/rex-amq-ui/internal/kitty"
 	"github.com/est7/rex-amq-ui/internal/layer"
 	"github.com/est7/rex-amq-ui/internal/rexctl"
 	"github.com/est7/rex-amq-ui/internal/ui"
@@ -75,6 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Server: os.Getenv("REX_SERVER"), Session: cmp(*session, os.Getenv("REX_SESSION")), Block: os.Getenv("REX_BLOCK"),
 		AdapterBin: *adapterBin, Options: ui.Options{Tab: *tab, Focused: *focus},
 		In: os.Stdin, Out: stdout,
+		Graphics: &ui.Graphics{Dir: kitty.DefaultDir, PID: os.Getpid()},
 	}
 	if *board {
 		cfg.Options.Size = layer.Board
@@ -103,6 +105,9 @@ type panelConfig struct {
 	// Size, when set, is the terminal's size (tests: the output is no
 	// terminal to ask).
 	Width, Height int
+	// Graphics, when set, draws the Graph tab's image (Kitty frame files
+	// in its Dir); nil leaves the Graph region background.
+	Graphics *ui.Graphics
 	// started, when set, is given the program before it runs (tests).
 	started func(*tea.Program)
 }
@@ -124,7 +129,7 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 	cache, _ := os.UserCacheDir()
 	model := ui.New(ui.Deps{
 		Layer: ctl, Clock: ui.SystemClock{}, Exec: execTool, LookPath: exec.LookPath,
-		CacheDir: cache, Editor: os.Getenv("EDITOR"),
+		CacheDir: cache, Editor: os.Getenv("EDITOR"), Graphics: cfg.Graphics,
 	}, cfg.Options)
 
 	in := apc.NewReader(cfg.In)
@@ -148,11 +153,21 @@ func runPanel(ctx context.Context, cfg panelConfig) error {
 	if panel != nil {
 		wg.Go(func() { panel.Watch(ctx, func(s layer.State) { prog.Send(s) }) })
 	}
-	_, err := prog.Run()
+	final, err := prog.Run()
 	cancel()
 	wg.Wait()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		err = nil
+	}
+	if m, ok := final.(ui.Model); ok {
+		// The Graph image and pixel mouse reports outlive the program's
+		// own terminal reset: clear them, and the unread frame files.
+		seq, cerr := m.CloseGraphics()
+		if seq != "" {
+			_, werr := io.WriteString(cfg.Out, seq)
+			cerr = errors.Join(cerr, werr)
+		}
+		err = errors.Join(err, cerr)
 	}
 	return err
 }

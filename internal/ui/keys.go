@@ -143,17 +143,9 @@ func (m *Model) stepBack() bool {
 func (m Model) enter() (tea.Model, tea.Cmd) {
 	switch m.tab {
 	case TabMembers, TabOverview:
-		handle := m.selectedHandle()
-		if handle == "" {
-			return m, nil
+		if handle := m.selectedHandle(); handle != "" {
+			return m, m.focus(handle)
 		}
-		a, ok := m.agent(handle)
-		if !ok || a.Pane != "present" || a.BlockID == "" {
-			m.hint, m.hintBad = handle+" has no pane to go to", true
-			return m, nil
-		}
-		block := a.BlockID
-		return m, m.act("focus "+handle, true, func(ctx context.Context, c Controller) error { return c.Jump(ctx, block) })
 	case TabEpics:
 		e, ok := m.selectedEpic()
 		if !ok {
@@ -165,6 +157,18 @@ func (m Model) enter() (tea.Model, tea.Cmd) {
 		m.toggleExcerpt()
 	}
 	return m, nil
+}
+
+// focus goes to handle's pane, minimizing the panel; without a pane it
+// says so in the footer.
+func (m *Model) focus(handle string) tea.Cmd {
+	a, ok := m.agent(handle)
+	if !ok || a.Pane != "present" || a.BlockID == "" {
+		m.hint, m.hintBad = handle+" has no pane to go to", true
+		return nil
+	}
+	block := a.BlockID
+	return m.act("focus "+handle, true, func(ctx context.Context, c Controller) error { return c.Jump(ctx, block) })
 }
 
 func (m Model) mailKey(s string) Model {
