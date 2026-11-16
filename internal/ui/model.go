@@ -5,7 +5,9 @@
 //
 // The model only reads. It never sends, reads, or marks mail, and never
 // starts, wakes, adopts, or retires an agent: its only effects are on its
-// own layer (Controller) and opening a hand-back for the human to read.
+// own layer (Controller), opening a hand-back for the human to read, and
+// the Graph tab's image (Kitty frame files and graphics commands, with
+// Deps.Graphics).
 package ui
 
 import (

@@ -17,7 +17,9 @@ import (
 	"github.com/est7/rex-amq-ui/internal/apc"
 	"github.com/est7/rex-amq-ui/internal/graph"
 	"github.com/est7/rex-amq-ui/internal/kitty"
+	"github.com/est7/rex-amq-ui/internal/layer"
 	"github.com/est7/rex-amq-ui/internal/pixelmouse"
+	"github.com/est7/rex-amq-ui/internal/raster"
 	"github.com/est7/rex-amq-ui/internal/theme"
 )
 
@@ -374,5 +376,42 @@ func TestGraphTabCloseGraphics(t *testing.T) {
 	}
 	if seq, err := build(t, "edited-crew-attention", boardW, boardH, Deps{}, Options{}).CloseGraphics(); seq != "" || err != nil {
 		t.Errorf("CloseGraphics without graphics = %q, %v", seq, err)
+	}
+}
+
+func TestGraphTabFailedMeasureDoesNotSpin(t *testing.T) {
+	ctl := &cellRecorder{err: errors.New("no size")}
+	g := newRig(t, graphPanel(t, ctl))
+	g.send(mustTab("graph"), 500)
+	if len(g.pending) != 0 {
+		t.Errorf("%d commands still pending after 500 messages: a failed measure keeps asking", len(g.pending))
+	}
+	if n := strings.Count(strings.Join(ctl.got(), " "), "cellsize"); n != 1 {
+		t.Errorf("asked the cell size %d times for one showing, want 1", n)
+	}
+	// A new trigger asks again: the connection coming up.
+	g.send(layer.State{Connected: false}, 20)
+	ctl.err, ctl.w, ctl.h = nil, cw, ch
+	if out := g.send(layer.State{Connected: true}, 20); transmitRE.FindString(out) == "" {
+		t.Errorf("the connection coming up did not measure and draw: %q", out)
+	}
+
+	off := newRig(t, graphPanel(t, nil))
+	off.send(mustTab("graph"), 500)
+	if len(off.pending) != 0 {
+		t.Errorf("without Rex, %d commands still pending after 500 messages", len(off.pending))
+	}
+}
+
+// BenchmarkGraphTabFrame is one wired frame: scene, paint, and the frame
+// file, at a Board on a Retina display (23x49-pixel cells).
+func BenchmarkGraphTabFrame(b *testing.B) {
+	now := time.Time(fixtures["edited-crew-attention"])
+	m := build(b, "edited-crew-attention", 98, 34, Deps{Clock: movingClock{&now}, Graphics: &Graphics{Dir: b.TempDir(), PID: 1}}, Options{})
+	m.gfx.cell = raster.Metrics{CellW: 23, CellH: 49}
+	for b.Loop() {
+		if m.draw() == "" {
+			b.Fatal("no frame")
+		}
 	}
 }

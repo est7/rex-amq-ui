@@ -37,9 +37,10 @@ type graphTab struct {
 	sched  *kitty.Scheduler
 	canvas *raster.Canvas
 	cell   raster.Metrics
-	// asking: a CellSize call is under way.
-	asking bool
-	phase  phase
+	// asking: a CellSize call is under way; again: something that can
+	// change the cell size happened meanwhile, so ask once more after it.
+	asking, again bool
+	phase         phase
 	// on: a frame may be on screen; mouse: pixel mouse reports are on.
 	on, mouse bool
 	// dirty: the picture changed since the last frame.
@@ -50,9 +51,10 @@ type graphTab struct {
 	at   string
 	hide bool
 	// selected is the node the human clicked; a second click focuses it.
-	selected string
-	visible  bool
-	owner    string
+	selected  string
+	visible   bool
+	owner     string
+	connected bool
 	// scene is the last frame drawn, for hit tests.
 	scene graph.Scene
 }
@@ -97,8 +99,10 @@ type (
 func (g graphicsOut) String() string { return g.seq }
 
 // graphics keeps the image in step with the model after msg: it measures
-// the cell, shows and hides the image with the tab, feeds the graph, turns
-// clicks into selections, and paces frames. It runs after every Update.
+// the cell (when the tab shows, on a resize, an owner change, or a new
+// connection), shows and hides the image with the tab, feeds the graph,
+// turns clicks into selections, and paces frames. It runs after every
+// Update.
 func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 	gt := m.gfx
 	var cmds []tea.Cmd
@@ -106,6 +110,7 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case cellSize:
 		gt.asking = false
+		measure, gt.again = gt.again, false
 		gt.cell = raster.Metrics{}
 		if msg.err == nil && msg.w > 0 && msg.h > 0 {
 			gt.cell = raster.Metrics{CellW: msg.w, CellH: msg.h}
@@ -120,9 +125,10 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 		measure = true
 		gt.restart()
 	case layer.State:
-		if msg.Owner != gt.owner {
-			gt.owner, measure = msg.Owner, true
+		if msg.Owner != gt.owner || (msg.Connected && !gt.connected) {
+			measure = true
 		}
+		gt.owner, gt.connected = msg.Owner, msg.Connected
 	case tea.ForegroundColorMsg, tea.BackgroundColorMsg:
 		gt.dirty = true
 	case tea.MouseClickMsg:
@@ -149,7 +155,12 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 	}
 	gt.visible = visible
 	gt.g.SetPaused(!visible)
-	if visible && !gt.asking && (measure || !gt.cell.Valid()) {
+	// The size is asked on a trigger only, never because the last answer
+	// was a failure: without Rex that would ask in a loop.
+	switch {
+	case visible && measure && gt.asking:
+		gt.again = true
+	case visible && measure:
 		gt.asking = true
 		cmds = append(cmds, m.measure())
 	}
