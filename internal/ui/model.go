@@ -112,6 +112,9 @@ type Model struct {
 	size   layer.Size
 	paused bool
 	frozen string // the frame on screen while paused
+	// sizeHeld: a resize came while paused; Update passes it on to the
+	// renderer on resume.
+	sizeHeld bool
 	// shown counts pauses and resumes. An action that leaves the panel
 	// records it when it starts and pauses the panel on success only if no
 	// pause or resume came in between: actions finish asynchronously, and
@@ -171,9 +174,39 @@ type actionDone struct {
 	err   error
 }
 
+// heldSize is a terminal resize that arrived while the panel was paused
+// (Filter). The renderer must not see it then: it would repaint.
+type heldSize tea.WindowSizeMsg
+
+// Filter is the program's message filter (tea.WithFilter): while the panel
+// is paused it keeps resizes from the renderer, which repaints on every
+// one, and hands them to the model, which passes the size on when it
+// resumes.
+func Filter(model tea.Model, msg tea.Msg) tea.Msg {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		if m, ok := model.(Model); ok && m.paused {
+			return heldSize(size)
+		}
+	}
+	return msg
+}
+
 // Update folds msg into the model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	n := next.(Model)
+	if n.sizeHeld && !n.paused {
+		n.sizeHeld = false
+		size := tea.WindowSizeMsg{Width: n.w, Height: n.h}
+		cmd = tea.Batch(cmd, func() tea.Msg { return size })
+	}
+	return n, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case heldSize:
+		m.w, m.h, m.sizeHeld = msg.Width, msg.Height, true
 	case adapter.FrameUpdate:
 		m.st = m.st.Apply(msg.Frame)
 		m.settle()

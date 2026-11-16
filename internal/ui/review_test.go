@@ -2,11 +2,15 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/est7/rex-amq-ui/internal/adapter"
+	"github.com/est7/rex-amq-ui/internal/apc"
 	"github.com/est7/rex-amq-ui/internal/layer"
 )
 
@@ -136,4 +140,101 @@ func TestObligationAgeAdvances(t *testing.T) {
 	if got := owes(); got != "20m" {
 		t.Fatalf("age %s at 09:20: the adapter sends no upsert for an age change", got)
 	}
+}
+
+func sgrBg(c color.Color) string {
+	r, g, b, _ := c.RGBA()
+	return fmt.Sprintf("48;2;%d;%d;%d", r>>8, g>>8, b>>8)
+}
+
+// styleBefore is the last SGR sequence before text on line.
+func styleBefore(t *testing.T, line, text string) string {
+	t.Helper()
+	i := strings.Index(line, text)
+	if i < 0 {
+		t.Fatalf("%q not on line %q", text, line)
+	}
+	j := strings.LastIndex(line[:i], "\x1b[")
+	return line[j:i]
+}
+
+func TestActiveTabAndSelectedRowColours(t *testing.T) {
+	w, h := refSize(t, layer.Board)
+	m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "members"})
+	m = press(t, m, "2")
+	ls := strings.Split(m.Frame(), "\n")
+	overlay, surface := sgrBg(m.pal.Overlay), sgrBg(m.pal.Surface)
+	if st := styleBefore(t, ls[1], " Members"); !strings.Contains(st, overlay) || !strings.HasPrefix(st, "\x1b[1;") {
+		t.Errorf("active tab style %q: want bold on the overlay", st)
+	}
+	if st := styleBefore(t, ls[1], " Overview"); !strings.Contains(st, surface) || strings.Contains(st, overlay) {
+		t.Errorf("inactive tab style %q: want the surface", st)
+	}
+	for _, l := range ls[headerLines:] {
+		switch p := plain(l); {
+		case strings.Contains(p, "implementer(claude-02)"):
+			if !strings.Contains(l, overlay) || !strings.HasSuffix(l, overlay+"m \x1b[m") {
+				t.Errorf("selected row is not on the overlay to its end: %q", l)
+			}
+		case strings.Contains(p, "orchestrator(claude-01)"), strings.Contains(p, "narrator(pi-04)"):
+			if strings.Contains(l, overlay) {
+				t.Errorf("unselected row on the overlay: %q", p)
+			}
+		}
+	}
+}
+
+func TestResizeWhilePausedWaitsForResume(t *testing.T) {
+	w, h := refSize(t, layer.Drawer)
+	m := build(t, "edited-crew-attention", w, h, Deps{}, Options{})
+	size := tea.WindowSizeMsg{Width: 90, Height: 30}
+	if got := Filter(m, size); got != tea.Msg(size) {
+		t.Fatalf("a showing panel's resize was filtered: %#v", got)
+	}
+	m = step(t, m, mustTab("overview"))
+	m = step(t, m, apcPause)
+	held := Filter(m, size)
+	if _, ok := held.(tea.WindowSizeMsg); ok {
+		t.Fatal("a paused panel's resize reached the renderer")
+	}
+	m = step(t, m, held)
+	if m.View().Content != m.frozen {
+		t.Fatal("the paused frame changed")
+	}
+	next, cmd := m.Update(apcResume)
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("resume did not pass the held size on")
+	}
+	var passed bool
+	for _, c := range flatten(cmd) {
+		if s, ok := c().(tea.WindowSizeMsg); ok && s == size {
+			passed = true
+		}
+	}
+	if !passed {
+		t.Fatal("the held size was not passed to the renderer on resume")
+	}
+	if bad := holes(m.Frame(), 90, 30); bad != nil {
+		t.Fatal(bad)
+	}
+}
+
+var (
+	apcPause  = apc.Command{Verb: apc.Pause}
+	apcResume = apc.Command{Verb: apc.Resume}
+)
+
+func flatten(cmd tea.Cmd) []tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	if b, ok := cmd().(tea.BatchMsg); ok {
+		var out []tea.Cmd
+		for _, c := range b {
+			out = append(out, flatten(c)...)
+		}
+		return out
+	}
+	return []tea.Cmd{cmd}
 }
