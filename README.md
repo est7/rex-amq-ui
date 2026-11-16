@@ -31,18 +31,26 @@ The panel has five tabs:
 
 ## How to install
 
-There is no release or Homebrew formula yet, and the repository has no remote. Build it from this checkout:
+Install from Homebrew (pulls in `est7/tap/rex-amq-adapter` as well):
+
+```sh
+brew install est7/tap/rex-amq-ui
+```
+
+Then add the plugin to your Rex config (`~/.config/rex/init.lua`):
+
+```lua
+dofile("/opt/homebrew/opt/rex-amq-ui/share/rex-amq-ui/init.lua").setup{ toggle_key = "cmd+shift+a", waiting_key = "cmd+shift+u" }
+```
+
+Or build from a local checkout:
 
 ```sh
 go install ./cmd/rex-amq-ui      # puts rex-amq-ui in $(go env GOPATH)/bin
 rex-amq-ui --version
 ```
 
-Then add one line to your Rex config (`~/.config/rex/init.lua`):
-
-```lua
-dofile("/Users/est9/projects/side/rex-amq-ui/lua/rex-amq-ui/init.lua").setup{ toggle_key = "cmd+shift+a", waiting_key = "cmd+shift+u" }
-```
+and point `dofile(...)` at `<checkout>/lua/rex-amq-ui/init.lua`.
 
 Check and reload the config:
 

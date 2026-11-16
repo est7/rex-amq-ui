@@ -1,0 +1,32 @@
+# Verifies every push to main and every pull request: build, vet, Go tests
+# with and without the race detector, and the Lua plugin stub harness.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: install luajit
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+      - name: race
+        run: go test -race ./...
+      - name: lua plugin harness
+        run: luajit lua/rex-amq-ui/tests/run.lua
