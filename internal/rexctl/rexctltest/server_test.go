@@ -40,6 +40,8 @@ func TestRexctltestRefusesRequestsOffSchema(t *testing.T) {
 		{"session.set_layer_state", map[string]any{"session_id": "s", "layer_id": "l", "state": 3}, "not of type"},
 		{"block.method", map[string]any{"session_id": "s", "block_id": "b", "method": "write", "args": map[string]any{"text": "x"}}, "missing required"},
 		{"block.method", map[string]any{"session_id": "s", "block_id": "b", "method": "explode"}, "not one the fake knows"},
+		{"session.new_layer", map[string]any{"session_id": "s", "bounds": []float64{0, 0, 1, 1},
+			"layout": map[string]any{"block": map[string]any{"flavor": "com.superlogical.terminal.shell", "options": map[string]any{"size": map[string]any{"colums": 80, "rows": 24}}}}}, "payload.layout.block.options.size"},
 	}
 	for _, c := range cases {
 		rec := &recorder{TB: t}

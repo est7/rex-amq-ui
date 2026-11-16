@@ -113,16 +113,21 @@ func TestRexctlHandshake(t *testing.T) {
 	}
 }
 
-// Rex sends a session's events from the moment it attaches, so one can
-// arrive before the attach's answer; its seq says it is older than the view.
+// A response's seq is the seq of the last event the connection was sent
+// when the server read the answer (live Rex: 0 before any event, then the
+// last event's; run dir live-probe-seq.txt). An event at or below an
+// attach's seq is already in its view; one above it is newer, even when it
+// arrives before the attach's answer.
 func TestRexctlAttachReadsTheViewAndOrdersEvents(t *testing.T) {
 	s := rexctltest.NewServer(t)
 	s.SetView(json.RawMessage(sampleView))
 	s.Handle("session.attach", func(r rexctltest.Request) (any, *rexctltest.Error) {
-		s.Emit(session, "session_view_changed", map[string]any{"revision": 6})
+		s.Emit(session, "session_view_changed", map[string]any{"revision": 8})
 		return map[string]any{"client_id": rexctltest.ClientID, "view": json.RawMessage(sampleView)}, nil
 	})
 	c := dial(t, s)
+	s.EmitServer("client_connected", map[string]any{"client_id": "client:other"})
+	older := nextEvent(t, c)
 	a, err := c.Attach(ctx(t), session)
 	if err != nil {
 		t.Fatal(err)
@@ -139,9 +144,12 @@ func TestRexctlAttachReadsTheViewAndOrdersEvents(t *testing.T) {
 	if _, l, _ := v.LayerOf(right); l.State != "" || l.Blocks[1].Owner != "client:app" {
 		t.Fatalf("tiled layer %+v", l)
 	}
+	if older.Name != "client_connected" || older.Seq != 1 || a.Seq != older.Seq {
+		t.Fatalf("event before the attach %+v, attach seq %d", older, a.Seq)
+	}
 	e := nextEvent(t, c)
 	vc, ok := e.ViewChanged()
-	if !ok || vc.Revision != 6 || e.SessionID != session || e.Seq >= a.Seq {
+	if !ok || vc.Revision != 8 || e.SessionID != session || e.Seq <= a.Seq {
 		t.Fatalf("event %+v (seq %d, attach seq %d)", e, e.Seq, a.Seq)
 	}
 	if _, ok := e.OwnerChanged(); ok {

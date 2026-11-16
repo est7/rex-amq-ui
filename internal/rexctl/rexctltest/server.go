@@ -72,11 +72,11 @@ type Server struct {
 	http     *http.Server
 	inputs   map[string]*schema // method -> input schema
 	blockArg map[string]*schema // terminal block method -> args schema
+	termOpts *schema            // a terminal block's options in a layout
 
 	mu         sync.Mutex
 	handlers   map[string]Handler
 	conns      map[*conn]bool
-	seq        int64
 	revision   int64
 	made       int
 	requests   []Request
@@ -85,9 +85,14 @@ type Server struct {
 	view       any
 }
 
+// conn is one client connection. Like Rex, it numbers the events it sends
+// from 1, and a response's seq is the seq of the last event sent before
+// the request was answered (0 before any): the client applies an attach's
+// view, then the events with a higher seq, even those that arrived first.
 type conn struct {
 	ws      *websocket.Conn
 	writeMu sync.Mutex
+	seq     int64 // last event seq; guarded by writeMu
 }
 
 // NewServer starts a fake on a Unix socket under a short temporary
@@ -141,6 +146,7 @@ func (s *Server) loadSchemas() error {
 			Name   string  `json:"name"`
 			Input  *schema `json:"input_schema"`
 			Args   *schema `json:"args_schema"`
+			Opts   *schema `json:"options_schema"`
 			Invoke struct {
 				Method string `json:"method"`
 			} `json:"invoke"`
@@ -153,6 +159,8 @@ func (s *Server) loadSchemas() error {
 			s.inputs[d.Name] = d.Input
 		case d.Args != nil:
 			s.blockArg[strings.TrimPrefix(d.Name, "com.superlogical.terminal.")] = d.Args
+		case d.Opts != nil:
+			s.termOpts = d.Opts
 		}
 	}
 	return nil
@@ -226,15 +234,13 @@ func (s *Server) CloseConnections() {
 
 func (s *Server) broadcast(msg func(seq int64) any) {
 	s.mu.Lock()
-	s.seq++
-	seq := s.seq
 	var conns []*conn
 	for c := range s.conns {
 		conns = append(conns, c)
 	}
 	s.mu.Unlock()
 	for _, c := range conns {
-		c.send(msg(seq))
+		c.sendEvent(msg)
 	}
 }
 
@@ -245,12 +251,31 @@ func (s *Server) violate(format string, args ...any) {
 }
 
 func (c *conn) send(v any) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.write(v)
+}
+
+// sendEvent numbers an event and sends it.
+func (c *conn) sendEvent(msg func(seq int64) any) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.seq++
+	c.write(msg(c.seq))
+}
+
+// watermark is the seq of the last event sent.
+func (c *conn) watermark() int64 {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.seq
+}
+
+func (c *conn) write(v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		panic(err)
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = c.ws.Write(ctx, websocket.MessageText, b)
@@ -322,11 +347,10 @@ func (s *Server) request(c *conn, msg []byte) {
 	h := s.handlers[m.Method]
 	s.mu.Unlock()
 
+	// The state the answer reads is taken now: an event the handler sends
+	// comes after it, with a higher seq, though it arrives first.
+	seq := c.watermark()
 	result, rerr := s.answer(req, h)
-	s.mu.Lock()
-	s.seq++
-	seq := s.seq
-	s.mu.Unlock()
 	out := map[string]any{"type": "response", "id": m.ID, "seq": seq}
 	if rerr != nil {
 		out["error"] = map[string]any{"code": rerr.Code, "message": rerr.Message, "status": rerr.Status}
@@ -359,6 +383,9 @@ func (s *Server) checkInput(req Request, in *schema) error {
 	if err := in.check("payload", v); err != nil {
 		return err
 	}
+	if req.Method == "session.new_layer" {
+		return s.checkLayout(v)
+	}
 	if req.Method != "block.method" {
 		return nil
 	}
@@ -373,6 +400,21 @@ func (s *Server) checkInput(req Request, in *schema) error {
 		a = map[string]any{}
 	}
 	return args.check("payload.args", a)
+}
+
+// checkLayout checks the options of a terminal block in a new layer's
+// layout against the terminal flavor's options_schema.
+func (s *Server) checkLayout(v any) error {
+	layout, _ := v.(map[string]any)["layout"].(map[string]any)
+	block, ok := layout["block"].(map[string]any)
+	if !ok || block["flavor"] != "com.superlogical.terminal.shell" {
+		return nil
+	}
+	opts, present := block["options"]
+	if !present {
+		return nil
+	}
+	return s.termOpts.check("payload.layout.block.options", opts)
 }
 
 func decode(b json.RawMessage) (any, error) {
