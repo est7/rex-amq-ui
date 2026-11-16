@@ -93,6 +93,12 @@ func (f *Face) Measure(s string) float64 {
 	return fix(font.MeasureString(f.face, s))
 }
 
+// Has reports whether the font draws r (a missing glyph draws as a box).
+func (f *Face) Has(r rune) bool {
+	_, ok := f.face.GlyphAdvance(r)
+	return ok
+}
+
 // Fit is s cut to at most w pixels wide, ending in "…" when cut.
 func (f *Face) Fit(s string, w float64) string {
 	if f.Measure(s) <= w {
