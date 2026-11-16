@@ -18,7 +18,7 @@ The panel has five tabs:
 | **Overview** | System alerts first: every member waiting on you, with a turn error, or stalled; bounced and dead-lettered mail; open obligations (`owed_by → owed_to`). Then the narrator's summary, the lifecycle, and the latest hand-back as a card with its *Blocked on me* items picked out. `o` opens the full hand-back. |
 | **Members** | The lead first, then *Active*, *Standing by*, and a folded *Retired* group (`r`). Each row has its number (`1`–`9`), `▶` on the pane you last focused, a status dot, `role(handle)`, model and effort, its tab (Board only), its task, and unread mail. `Enter` focuses the member's pane and hides the panel. |
 | **Mail** | Every message in time order: `from → to`, age, state (`queued`, `drained`, `bounced`, `dead_lettered`), subject. `/` searches subjects, `p` shows only the selected member's mail, `f` follows new mail, `Space` expands the excerpt you are allowed to see. |
-| **Graph** | A replay bar (`[` `]` step through messages, `L` back to Live, `h` hides retired members) above the message graph and a legend. See [Graph renderer](#graph-renderer). |
+| **Graph** | A picture of who mails whom, drawn as an image: members around an ellipse, mail as arrows between them. A replay bar above it (`[` `]` step through messages, `L` back to Live, `h` hides retired members) and a legend below. Click a member to select it; click it again to go to its pane. See [Graph](#graph). |
 | **Epics** | Only in a session with a live personal agent, where it is the first tab: every linked Epic with its lifecycle, pending hand-back, alert count, and the narrator's latest line. `Enter` switches Rex to that Epic's session. |
 
 ## Requirements
@@ -26,6 +26,7 @@ The panel has five tabs:
 - macOS and Rex with control API revision 13 (tested with Rex 0.1.0-preview.18).
 - `rex-amq-adapter` recent enough to have `panel --json`. The panel looks for it in this order: `$REX_AMQ_ADAPTER_BIN`, then `/opt/homebrew/opt/rex-amq-adapter/bin/rex-amq-adapter`, then `PATH`. `--adapter-bin` (or the plugin's `adapter_bin` option) overrides all three.
 - Go 1.27 to build it.
+- For the Graph tab, a terminal that reads Kitty graphics from temporary files (`t=t`), as Rex's does, and SGR pixel mouse reports (mode 1016) for clicks.
 - Optional: `md-viewer` to read a full hand-back (`o`). Without it the panel opens a read-only copy in `$EDITOR`.
 
 ## How to install
@@ -85,6 +86,7 @@ The plugin finds `rex-amq-ui` through your login shell (`$SHELL -l -c 'command -
 | Overview | `o` | Open the full hand-back with `md-viewer` (or `$EDITOR`) |
 | Mail | `/`, `p`, `f`, `Space` | Search subjects, this member's mail only, follow, expand excerpt |
 | Graph | `[` `]`, `L`, `h` | Previous / next message, back to Live, hide retired |
+| Graph | click a member | Select it (Members follows); a second click focuses its pane and hides the panel |
 | Panel | `Esc` / `q` | Step back (clear a filter, close an excerpt); at the top, hide the panel |
 | Panel | `Q` | Quit the panel; Rex closes its layer, and the next toggle opens a new one |
 
@@ -131,11 +133,16 @@ The panel takes these sequences out of its input wherever the reads split them, 
 
 While paused, the panel keeps folding the adapter's frames but writes nothing. It also pauses when it sees its layer minimized, and it resumes on `resume`, when its layer goes from minimized to normal, or on any key.
 
-## Graph renderer
+## Graph
 
-*Not on this branch yet: Slice s3 builds it. This section follows the spec (§3.5).*
+The Graph tab draws its picture as an image, through the Kitty graphics protocol, between the replay bar and the legend.
 
-The Graph tab today draws its chrome (the replay bar and the legend) and leaves the region between them painted with the background. s3 fills that region with a Kitty-graphics image: members on a circle and messages as directed edges. Solid edges are drained mail, highlighted edges are open obligations, and dashed edges are queued, bounced, or dead-lettered mail. The image is rendered in pure Go and sent as Kitty `t=t` temporary files under two alternating image ids, so frames do not flicker. It animates only while someone is working or a message is in flight. Clicking a node selects that member.
+- **What it shows.** Members sit around an ellipse, the lead at the top and the rest clockwise. Up to 6 live members get a node each, and the others fold into one `+N` node. While retired members are shown (`h` toggles them), up to 2 of them appear dimmed. Each pair of members that mailed has one arrow per direction, thicker the more mail it carries. A solid green arrow is drained mail, a dashed blue one is queued mail, and a dashed red one is bounced or dead-lettered mail. A yellow arrow with a glow is an open obligation. A working member's node breathes, and new mail sends a pulse along its arrow for 1.2 seconds. Text is Go Mono, compiled into the binary, so a frame looks the same on every machine.
+- **Replay.** `[` and `]` move the cursor one message back or forward, and the picture shows the mail up to it, pulsing the message the cursor reaches. `L` (or `Esc`) goes back to Live, and the mail the replay hid pulses once.
+- **Clicks.** A left click on a node selects that member, here and in Members. A second click on the selected node does what `Enter` does on Members: it focuses that member's pane and hides the panel.
+- **Cost.** A frame is drawn only when something changed or something moves on its own (a working member, a pulse), at up to 30 frames a second. An idle graph draws nothing. The panel draws no image while it is paused or on another tab, and removes the one it showed. Each frame goes to the terminal as a file in `/tmp`, which the Kitty protocol has the terminal delete once read (not yet observed on Rex). When the terminal has not read the last 3 frames, the panel skips frames and says so in the footer. On exit the panel removes the image, turns pixel mouse reports off, and deletes any of its frame files left in `/tmp`.
+
+[docs/design.md](docs/design.md#graph-renderer) covers how frames are drawn and sent, and which Rex behaviour it relies on that no test has seen yet.
 
 ## How to test
 
@@ -147,7 +154,7 @@ lua/rex-amq-ui/tests/integration.sh                    # live: needs a running l
 REX_AMQ_ADAPTER_BIN=/path/to/rex-amq-adapter go test -run TestAdapterPanelIntegration ./internal/adapter
 ```
 
-`go test` and the Lua harness never touch Rex. `integration.sh` builds the binary and creates its own Rex session, which it kills on exit. It drives the plugin there through `rex do`, with a fake adapter that replays `testdata/panel` streams. It never selects that session in the app, reloads your config, or touches another session. An interrupted run (Ctrl-C, `TERM`, `HUP`) still kills the session. The last command runs the panel's stream against a real adapter build.
+`go test` and the Lua harness never touch Rex. `integration.sh` builds the binary and creates its own Rex session, which it kills on exit. It drives the plugin there through `rex do`, with a fake adapter that replays `testdata/panel` streams. It never selects that session in the app, reloads your config, or touches another session. An interrupted run (Ctrl-C, `TERM`, `HUP`) still kills the session. The last command runs the panel's stream against a real adapter build. The Graph tab's frames are compared with reference PNGs in `testdata/graph` and `testdata/raster`, and its text with `testdata/golden`; `go test ./internal/graph ./internal/raster ./internal/ui -update` rewrites them after an intended change.
 
 ## Design
 

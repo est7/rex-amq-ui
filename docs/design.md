@@ -4,7 +4,7 @@ rex-amq-ui shows one Rex session's crew to the human in a floating layer of that
 
 ## Boundaries
 
-The adapter (`rex-amq-adapter`) is the single source of truth for agents, mail, and session views. It owns every file under `~/.local/state/rex-amq-adapter/`, and rex-amq-ui reads none of them. It reads only the NDJSON that `rex-amq-adapter panel --json` writes to stdout. It acts only on its own floating layer and on the human's focus, through Rex's control API.
+The adapter (`rex-amq-adapter`) is the single source of truth for agents, mail, and session views. It owns every file under `~/.local/state/rex-amq-adapter/`, and rex-amq-ui reads none of them. It reads only the NDJSON that `rex-amq-adapter panel --json` writes to stdout. It acts only on its own floating layer and on the human's focus, through Rex's control API, and writes only the Graph tab's frame files, under `/tmp`.
 
 What rex-amq-ui never does:
 
@@ -32,6 +32,7 @@ flowchart LR
     L["internal/layer"]
     P["internal/apc"]
     U["internal/ui + internal/theme"]
+    G["internal/graph · raster<br/>kitty · pixelmouse"]
   end
   Panel -- stdout --> A
   A --> U
@@ -40,6 +41,8 @@ flowchart LR
   Lua -- "set_layer_state · move_block · float_block · focus_block" --> API
   P --> U
   U --> L --> R <--> API
+  U --> G
+  G -- "Kitty t=t frames, pixel mouse<br/>(the panel's own terminal)" --> Rex
 ```
 
 | Package | Owns |
@@ -48,8 +51,12 @@ flowchart LR
 | `internal/rexctl` | A client of `rex.control.v1`: one WebSocket on the server's Unix socket, with requests, responses, and events. The panel calls Rex in 0.1–3 ms this way, where starting the `rex` CLI for each call would take about 76 ms. `rexctltest` is a fake server that validates every request against the method schemas recorded from the real server (`rexctltest/schemas`). |
 | `internal/layer` | The facts about the panel's layer: its label (`rex-amq-ui`), its two sizes (Drawer `[0.64,0.02,0.35,0.96]`, Board `[0.06,0.06,0.88,0.88]`), and the order of the calls that leave it. Creating or restoring the layer (`Open`, used by `open`). From inside the panel: zoom, minimize, jump to a pane or to another session, and follow focus, owner, size, and the layer id (`Panel.Watch`). |
 | `internal/apc` | Taking the private `ESC _ amqui;… ESC \` sequences out of the panel's stdin, wherever reads split them. A 32-byte cap bounds a sequence. A lone `ESC` that waits more than 40 ms counts as the Esc key. |
-| `internal/ui`, `internal/theme` | The Bubble Tea model: it folds stream updates, layer states, APC commands, and keys into one state, and renders the five tabs. Its only effects are on its own layer and on opening a hand-back for the human to read. `theme` holds the Everforest palette and the palette taken from the terminal's real colours. |
-| `cmd/rex-amq-ui` | The three commands: the panel, `open`, and `waiting`. |
+| `internal/ui`, `internal/theme` | The Bubble Tea model: it folds stream updates, layer states, APC commands, and keys into one state, and renders the five tabs. Its only effects are on its own layer, on opening a hand-back for the human to read, and on the Graph tab's image (`graph.go`). `theme` holds the Everforest palette and the palette taken from the terminal's real colours. |
+| `internal/graph` | The Graph tab's picture: the replay cursor's view of the mail, the selection, pulses, and the animation clock (`Model`); nodes and edges placed at a pixel size (`Scene`); drawing a scene (`Paint`). |
+| `internal/raster` | Anti-aliased shapes and Go Mono text drawn into an opaque RGBA canvas in pure Go, sized from the terminal's cell size. `rastertest` compares a canvas with a reference PNG. |
+| `internal/kitty` | Sending frames with the Kitty graphics protocol (`Transport`) and pacing them at 24–30 fps while something moves (`Scheduler`). |
+| `internal/pixelmouse` | The escape sequences that turn SGR pixel mouse reports on and off, and the hit test from a pointer's pixel to a node. Bubble Tea parses the reports. |
+| `cmd/rex-amq-ui` | The three commands: the panel, `open`, and `waiting`. The panel's terminal writer, shared under one lock by the renderer and the Graph tab, and its exit path, which tears the Graph image down. |
 | `lua/rex-amq-ui/init.lua` | The Rex plugin: the two actions and their keys. |
 
 The policy lives in Go and the Lua stays plumbing. The plugin never decides who waits or how a layer is created. It asks the binary (`waiting --json`, `open`) and makes only the few Rex calls that a key press needs to be instant: restoring or minimizing an existing layer, and moving it between tabs. It finds the panel by the same rule as `layer.Open`: a floating-layer block labelled `rex-amq-ui`, preferring the active tab's. If that rule changes, change both. The plugin adds one fallback that `open` lacks: a block labelled `rex-amq-ui` in a window's tiled layout. A cross-tab move that broke off between `move_block` and `float_block` leaves the panel there, and the next toggle floats it again instead of opening a second panel.
@@ -84,17 +91,35 @@ The program forces TrueColor (`colorprofile.TrueColor`), because `NO_COLOR` or a
 
 ## Pause and resume
 
-A minimized layer keeps its process running. Drawing into it would waste work and, for the Graph tab, leave images behind. The panel pauses on APC `pause` (which the plugin sends before minimizing), on its own minimize, and when it sees its layer minimized in the view. While paused it folds frames, writes nothing, and asks for no colours. It resumes on APC `resume`, on its layer going from minimized to normal (an edge, not a level), or on any key, and it draws the current frame at once. `Q` exits the process.
+A minimized layer keeps its process running. Drawing into it would waste work, and on the Graph tab would leave an image behind. The panel pauses on APC `pause` (which the plugin sends before minimizing), on its own minimize, and when it sees its layer minimized in the view. While paused it folds frames, writes nothing, and asks for no colours. It resumes on APC `resume`, on its layer going from minimized to normal (an edge, not a level), or on any key, and it draws the current frame at once. `Q` exits the process.
+
+Bubble Tea's renderer repaints on every resize, so the program's message filter (`ui.Filter`) holds a resize that arrives while the panel is paused and hands the model the size instead. The model passes the size on to the renderer when it resumes. Pausing also counts as leaving the Graph tab: the image is deleted, pixel mouse reports are turned off, and the frame loop stops.
 
 ## Graph renderer
 
-*Not on this branch yet: Slice s3 builds it in `internal/graph`, `internal/kitty`, `internal/raster`, and `internal/pixelmouse`. This section follows the spec (§3.5).*
+The Graph tab draws into the cell rectangle `ui.Model.GraphRegion()` gives (`Y=3`, `H=height−6`, between the replay bar and the legend). The text frame paints that rectangle with the background, and the image is placed over it. `ui/graph.go` (`graphTab`) ties the parts together and runs only inside `Update`, so one goroutine changes it.
 
-- **Region.** `ui.Model.GraphRegion()` gives the cell rectangle between the replay bar and the legend (`Y=3`, `H=height−6`). The model paints it with the background until the renderer draws there.
-- **Pixel size.** Before the Rex app claims a block, Rex's built-in terminal answers `CSI 16 t` with a synthetic 8×16 cell. The renderer therefore reads `cell_width_px` and `cell_height_px` from `block.method size` over the control connection, and reads them again on `SIGWINCH` and `block_owner_changed`.
-- **Rendering.** It uses pure Go SDF rasterisation with an OpenType monospace font (`golang.org/x/image/font/opentype`): anti-aliased node badges and quadratic Bézier edges. Edge width grows with the message count. Solid edges are drained mail, highlighted edges are open obligations, and dashed edges are queued, bounced, or dead-lettered mail. It animates at 24–30 fps only while a member is working, a message is in flight, or a replay transition runs. Otherwise, and while paused, it stops at 0 fps.
-- **Kitty transport.** Each frame is written to `/tmp/tty-graphics-protocol-rex-amq-ui-<pid>-<seq>.rgba` and sent with `a=T,f=32,t=t,i=<1|2>,p=1,C=1,q=2`. The two image ids alternate: the new frame is placed first, then the old one is deleted (`a=d,d=I,i=<old>,q=2`), so there is no flicker. Rex deletes a `t=t` file once it has read it, and the panel globs away any leftovers on exit. Leaving the tab or pausing sends `a=d,d=A,q=2`.
-- **Mouse.** SGR pixel mouse (`?1002h ?1006h ?1016h`) hit-tests nodes, using the real cell height to subtract the header.
+- **Cell size.** Before the Rex app claims a block, Rex's built-in terminal answers `CSI 16 t` with a synthetic 8×16 cell. The panel therefore asks Rex for its block's `cell_width_px` and `cell_height_px` (`layer.Panel.CellSize`, over the control connection). It asks when the tab starts showing, on a resize, when the block's owner changes, and when the control connection comes back. It never asks again just because the last answer failed, so outside Rex it does not loop. Without a cell size it draws no image.
+- **Drawing.** `graph.Model` takes each new `adapter.State`. It places the lead at the top of an ellipse and the others clockwise, with up to 6 live members and a `+N` node for the rest, plus up to 2 retired members while they are shown. Edges are quadratic curves with one lane per direction, routed around other nodes, and their width grows with the message count. Styles: drained is a solid line, queued and bounced or dead-lettered mail are dashed, and an open obligation is a solid line over a translucent glow. Colours come from the panel's palette, so the image matches the cells around it. `raster` draws with signed distance fields and Go Mono text, compiled into the binary. A 2254×1372 px frame takes about 7 ms to draw and send, file included. `testdata/graph/*.png` and `testdata/raster/*.png` are the reference frames at 9×22 and 23×49 px cells; the text legend lives in `testdata/golden/graph_*.golden`.
+- **Pacing.** A frame is due when the picture changed (new state, a replay step, a selection, a new cell size or colour) or moves on its own (a working member breathes; a new message's pulse runs for 1.2 s). `kitty.Scheduler` runs a frame loop at 30 fps only while one is due, and draws a last frame when the motion stops. An idle graph sends nothing. Each tick fires once, and a tick from a stopped loop changes nothing. A new showing, and a resize, waits 50 ms before its first frame, because the renderer's erase-and-repaint after a resize or a resume deletes images and can land after the frame.
+- **Kitty transport.** `kitty.Transport.Show` writes the frame to `/tmp/tty-graphics-protocol-rex-amq-ui-<pid>-<seq>.rgba` and sends, in one write, `a=T,f=32,t=t,i=<1|2>,p=1,C=1,q=2` at the region's top-left cell (cursor saved and restored around it), then `a=d,d=I,i=<old>,q=2`. The two image ids alternate, so the new frame is up before the old one goes and nothing flickers. Leaving the tab, pausing, or minimizing sends `a=d,d=A,q=2`. At most 3 frame files may wait unread; past that `Show` refuses with `ErrBacklog`, the footer says the terminal has not read the last frames, and the panel tries again at the frame rate without painting.
+- **Write order.** The renderer and the Graph tab write to the terminal through one locked writer (`lockOutput` in `cmd/rex-amq-ui`). Every graphics command is written synchronously from `Update`, so a teardown cannot be overtaken by the frame before it, or land after the next showing's frame. What the tab believes is on screen changes only after a write succeeds. A write cut off part way counts as possibly on screen, so the teardown stays owed and is retried on the next `Update`, and the next write starts with CAN ST to get the terminal's parser out of a half-sent sequence.
+- **Mouse.** Before its first frame the tab turns on SGR pixel mouse reports (`?1002h ?1006h ?1016h`); Bubble Tea parses them into click messages. `pixelmouse.HitTest` subtracts the region's pixel origin (its rows times the real cell height) and finds the node under the pointer, the topmost when nodes overlap.
+- **Exit.** `runPanel` ends through `endPanel`, which calls `Model.CloseGraphics` after Bubble Tea's own terminal reset: it deletes the image, turns pixel mouse reports off, and removes this process's unread frame files. A panic still runs it and stays an error; only the caller's cancellation counts as a normal end.
+
+**Not seen on Rex yet.** The Graph tab is tested headless, against a fake Kitty terminal that keeps screen state. These Rex behaviours it relies on have not been observed:
+
+- whether text written over the region, or an erase, deletes the image (the 50 ms settle exists for this, and no test can see it);
+- whether Rex deletes a `t=t` file after reading it, as the Kitty protocol says; if it does not, the 3-file budget stalls the graph after three frames, and the exit sweep removes the files;
+- whether the exit clear, written after the program leaves the alternate screen, reaches images placed in it;
+- whether mouse pixels and `cell_*_px` use the same unit (device pixels on Retina);
+- whether SGR 1016 coordinates are 1-based, as Bubble Tea assumes.
+
+**Known risks.**
+
+- A terminal that stops reading the panel's output blocks `Update` on its next graphics write, and the panel stalls until the terminal drains. Rex reads every block's pty continuously, minimized layers included. A writer goroutine with a queue would avoid the stall at the cost of the write-order guarantee above.
+- While something animates, a Retina Board writes about 370 MB/s of frame files to `/tmp` at 30 fps. An idle graph writes nothing.
+- `TestGraphTabProgramPanicCleansUp` skips under `-race`: Bubble Tea v2.1.1 closes its cancel reader on a panic without waiting for its read loop, which the race detector flags about once in ten runs. `TestGraphTabEndPanelKeepsPanic` covers the panel's own part under `-race`.
 
 ## Rex control-protocol notes
 
