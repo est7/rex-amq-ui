@@ -203,6 +203,10 @@ func runOpen(args []string, getenv func(string) string, stdout, stderr io.Writer
 		}
 		return 2
 	}
+	if *tab != "" && !slices.Contains(apc.Tabs, *tab) {
+		fmt.Fprintf(stderr, "rex-amq-ui open: no tab %q (want one of %s)\n", *tab, strings.Join(apc.Tabs, ", "))
+		return 2
+	}
 	l := layer.Launch{Session: cmp(*session, getenv("REX_SESSION")), Tab: *tab}
 	l.Board = *board
 	server := getenv("REX_SERVER")

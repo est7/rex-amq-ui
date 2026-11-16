@@ -191,3 +191,26 @@ func erases(raw string) (seen map[string]int, bad []string) {
 	}
 	return seen, bad
 }
+
+func TestOpenExitCodes(t *testing.T) {
+	env := func(kv map[string]string) func(string) string { return func(k string) string { return kv[k] } }
+	rex := env(map[string]string{"REX_SERVER": "unix:///nonexistent/rex.sock", "REX_SESSION": "session:s"})
+	for _, c := range []struct {
+		name string
+		args []string
+		env  func(string) string
+		want int
+	}{
+		{"help", []string{"--help"}, rex, 0},
+		{"unknown flag", []string{"--nope"}, rex, 2},
+		{"unknown tab", []string{"--tab", "inbox"}, rex, 2},
+		{"no server", nil, env(map[string]string{"REX_SESSION": "session:s"}), 2},
+		{"no session", nil, env(map[string]string{"REX_SERVER": "unix:///x.sock"}), 2},
+		{"Rex unreachable", []string{"--tab", "mail"}, rex, 1},
+	} {
+		var out, errb bytes.Buffer
+		if got := runOpen(c.args, c.env, &out, &errb); got != c.want || out.Len() != 0 {
+			t.Errorf("%s: exit %d stdout %q, want exit %d and no stdout", c.name, got, out.String(), c.want)
+		}
+	}
+}
