@@ -418,3 +418,35 @@ func TestOpenBesideClosesABlockItCouldNotPlace(t *testing.T) {
 		t.Fatal("the unplaced block was left running")
 	}
 }
+
+func TestGraphTabCellSizeFromBlock(t *testing.T) {
+	s := rexctltest.NewServer(t)
+	halfWindow(s)
+	s.SetView(view(3, paneA, true, rexctl.LayerNormal, "client:app", Drawer.Bounds()))
+	p, err := Connect(context.Background(), s.URL, sess, panel, paneA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, h, err := p.CellSize(context.Background())
+	if err != nil || w != 9 || h != 22 {
+		t.Fatalf("CellSize = %d x %d, %v; want the block's 9 x 22", w, h, err)
+	}
+	r, _ := s.Last("block.method")
+	var call struct {
+		BlockID string `json:"block_id"`
+		Method  string `json:"method"`
+	}
+	if err := r.Decode(&call); err != nil || call.BlockID != panel || call.Method != "size" {
+		t.Errorf("CellSize asked %+v (%v), want the panel's own block's size", call, err)
+	}
+
+	s.Handle("block.method", func(rexctltest.Request) (any, *rexctltest.Error) {
+		return map[string]any{"columns": 70, "rows": 48}, nil
+	})
+	if _, _, err := p.CellSize(context.Background()); err == nil {
+		t.Errorf("a size without cell pixels was accepted")
+	}
+	if _, _, err := New(s.URL, sess, panel, "").CellSize(context.Background()); !errors.Is(err, ErrDisconnected) {
+		t.Errorf("CellSize before connecting: %v, want ErrDisconnected", err)
+	}
+}

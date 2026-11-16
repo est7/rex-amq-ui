@@ -5,7 +5,9 @@
 //
 // The model only reads. It never sends, reads, or marks mail, and never
 // starts, wakes, adopts, or retires an agent: its only effects are on its
-// own layer (Controller) and opening a hand-back for the human to read.
+// own layer (Controller), opening a hand-back for the human to read, and
+// the Graph tab's image (Kitty frame files and graphics commands, with
+// Deps.Graphics).
 package ui
 
 import (
@@ -34,6 +36,8 @@ type Controller interface {
 	SwitchTo(ctx context.Context, session string) error
 	// OpenBeside runs argv in a new pane split in before anchor.
 	OpenBeside(ctx context.Context, anchor, label string, argv []string) error
+	// CellSize is the pixel size of one cell of the panel's terminal.
+	CellSize(ctx context.Context) (w, h int, err error)
 }
 
 // Clock is the time relative times are measured from.
@@ -58,6 +62,9 @@ type Deps struct {
 	CacheDir string
 	// Editor is $EDITOR, the fallback viewer.
 	Editor string
+	// Graphics, when set, draws the Graph tab's image with Kitty graphics;
+	// without it the region stays background.
+	Graphics *Graphics
 }
 
 // Options are the panel's starting state.
@@ -135,6 +142,8 @@ type Model struct {
 	// list is Live.
 	graphAt     string
 	hideRetired bool
+	// gfx is the Graph tab's image; nil without Deps.Graphics.
+	gfx *graphTab
 }
 
 type mailState struct {
@@ -154,6 +163,9 @@ func New(d Deps, o Options) Model {
 		mail: mailState{follow: true, expanded: map[string]bool{}}}
 	m.lay.Focused = o.Focused
 	m.lay.Size = o.Size
+	if d.Graphics != nil {
+		m.gfx = newGraphTab(*d.Graphics, d.Clock)
+	}
 	m.tab = TabOverview
 	if t, ok := tabNamed(o.Tab); ok {
 		m.tab, m.tabSet = t, true
@@ -199,6 +211,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		n.sizeHeld = false
 		size := tea.WindowSizeMsg{Width: n.w, Height: n.h}
 		cmd = tea.Batch(cmd, func() tea.Msg { return size })
+	}
+	if n.gfx != nil {
+		cmd = tea.Batch(cmd, n.graphics(msg))
 	}
 	return n, cmd
 }
