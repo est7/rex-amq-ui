@@ -17,6 +17,7 @@ local M = {}
 local LABEL = "rex-amq-ui" -- the panel's block label; one panel per session
 local ESC = "\27"
 local EXEC_TIMEOUT = 20 -- seconds; `open` gives Rex 15, `waiting` the adapter 5
+local DRAWER, BOARD = { 0.64, 0.02, 0.35, 0.96 }, { 0.06, 0.06, 0.88, 0.88 } -- internal/layer's sizes
 
 local defaults = { toggle_key = "cmd+shift+a", waiting_key = "cmd+shift+u", bin = false, adapter_bin = false, board = false }
 local checks = {
@@ -123,16 +124,21 @@ local function run(session, args)
   return value
 end
 
--- find_panel is the panel's floating layer in view, preferring the active
--- window's (the rule `rex-amq-ui open` uses).
+-- find_panel is the panel's block in view: in a floating layer, preferring
+-- the active window's (the rule `rex-amq-ui open` uses). Failing that, a
+-- panel block left in a window's layout by a move that broke off halfway
+-- (floating = false), so the plugin floats it again instead of opening a
+-- second panel.
 local function find_panel(view)
-  local found
+  local found, best = nil, -1
   for _, w in ipairs(view.windows or {}) do
     for _, l in ipairs(w.layers or {}) do
-      if l.kind == "floating" then
-        for _, b in ipairs(l.blocks or {}) do
-          if b.label == LABEL and (not found or w.window_id == view.active_window_id) then
-            found = { window = w, layer = l, block = b.block_id }
+      for _, b in ipairs(l.blocks or {}) do
+        if b.label == LABEL then
+          local floating = l.kind == "floating"
+          local rank = (floating and 2 or 0) + (w.window_id == view.active_window_id and 1 or 0)
+          if rank > best then
+            found, best = { window = w, layer = l, block = b.block_id, floating = floating }, rank
           end
         end
       end
@@ -165,30 +171,45 @@ local function write(session, block, data)
 end
 
 local function is_up(panel)
-  return panel.layer.state ~= "minimized"
+  return panel.floating and panel.layer.state ~= "minimized"
 end
 
 -- hide pauses the panel, then minimizes its layer; Rex gives focus back to
 -- the pane used before it.
 local function hide(session, panel)
-  local _, err = write(session, panel.block, apc("pause"))
-  if err then log("warn", err) end -- the panel also pauses when it sees its layer minimized
+  local _, paused_err = write(session, panel.block, apc("pause"))
+  if paused_err then log("warn", paused_err) end -- the panel also pauses when it sees its layer minimized
   local ok, why = call("session.set_layer_state", { session_id = session, layer_id = panel.layer.layer_id, state = "minimized" })
-  if not ok then return failed(why) end
+  if not ok then
+    -- The layer stays up: a panel left paused there would look frozen, and
+    -- no minimized-to-normal edge would ever wake it.
+    if not paused_err then
+      local _, resume_err = write(session, panel.block, apc("resume"))
+      if resume_err then why = why .. "; resuming the panel failed too: " .. resume_err end
+    end
+    return failed(why)
+  end
   return { action = "minimized", layer_id = panel.layer.layer_id, block_id = panel.block }
 end
 
--- move_here brings the panel from another tab into the active one, at the
--- size it had: into the active window's layout, then out into a new
--- floating layer. The panel finds its new layer by itself.
-local function move_here(session, view, panel)
-  local anchor = tiled_anchor(window_of(view, view.active_window_id))
-  if not anchor then return nil, "the active tab has no pane to bring the panel beside" end
-  local ok, err = call("session.move_block", { session_id = session, block_id = panel.block, anchor_block_id = anchor })
-  if not ok then return nil, err end
-  local floated
-  floated, err = call("session.float_block", { session_id = session, block_id = panel.block, bounds = panel.layer.bounds })
-  if not floated then return nil, err end
+-- bring_here floats the panel in the active tab: from another tab it goes
+-- into the active window's layout first (move_block), then out into a new
+-- floating layer at the size it had (float_block). A panel already in a
+-- layout, where a move that broke off left it, gets the default size. The
+-- panel finds its new layer by itself.
+local function bring_here(session, view, panel)
+  if panel.window.window_id ~= view.active_window_id then
+    local anchor = tiled_anchor(window_of(view, view.active_window_id))
+    if not anchor then return nil, "the active tab has no pane to bring the panel beside" end
+    local ok, err = call("session.move_block", { session_id = session, block_id = panel.block, anchor_block_id = anchor })
+    if not ok then return nil, err end
+  end
+  local bounds = panel.floating and panel.layer.bounds or (options.board and BOARD or DRAWER)
+  local floated, err = call("session.float_block", { session_id = session, block_id = panel.block, bounds = bounds })
+  if not floated then
+    -- The next toggle finds the panel in the layout and floats it again.
+    return nil, err
+  end
   return floated.layer_id
 end
 
@@ -208,9 +229,9 @@ local function show(session, view, tab)
     return { action = "opened", layer_id = opened.layer_id, block_id = opened.block_id }
   end
   local layer, action = panel.layer.layer_id, "restored"
-  if panel.window.window_id ~= view.active_window_id then
+  if not panel.floating or panel.window.window_id ~= view.active_window_id then
     local err
-    layer, err = move_here(session, view, panel)
+    layer, err = bring_here(session, view, panel)
     if not layer then return failed(err) end
     action = "moved"
   end
@@ -233,7 +254,7 @@ function M.toggle(ctx)
   local view, err = view_of(session)
   if not view then return failed(err) end
   local panel = find_panel(view)
-  if panel and panel.window.window_id == view.active_window_id and is_up(panel)
+  if panel and is_up(panel) and panel.window.window_id == view.active_window_id
       and panel.window.focused_block_id == panel.block then
     return hide(session, panel)
   end
@@ -252,14 +273,18 @@ function M.waiting(ctx)
   end
   local view
   view, err = view_of(session)
+  if not view then return failed(err) end
   if #members == 1 and members[1].block_id then
-    local panel = view and find_panel(view)
-    if panel and is_up(panel) then hide(session, panel) end
+    -- Focus only once the panel is out of the way, as the panel's own Enter does.
+    local panel = find_panel(view)
+    if panel and is_up(panel) then
+      local hidden = hide(session, panel)
+      if hidden.action ~= "minimized" then return hidden end
+    end
     local ok, why = call("session.focus_block", { session_id = session, block_id = members[1].block_id })
     if not ok then return failed(why) end
     return { action = "focused", handle = members[1].handle, block_id = members[1].block_id }
   end
-  if not view then return failed(err) end
   return show(session, view, "overview")
 end
 

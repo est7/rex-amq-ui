@@ -188,7 +188,7 @@ local function view(active, windows)
   for _, spec in ipairs(windows) do
     local w = { window_id = spec.id, focused_block_id = spec.focused, layers = {} }
     local tiled = { layer_id = "layer:tiled-" .. spec.id, kind = "tiled", bounds = { 0, 0, 1, 1 }, blocks = {} }
-    for _, b in ipairs(spec.tiled or {}) do tiled.blocks[#tiled.blocks + 1] = { block_id = b, label = "" } end
+    for _, b in ipairs(spec.tiled or {}) do tiled.blocks[#tiled.blocks + 1] = { block_id = b, label = (spec.labels or {})[b] or "" } end
     w.layers[1] = tiled
     for _, f in ipairs(spec.floating or {}) do
       w.layers[#w.layers + 1] = { layer_id = f.id, kind = "floating", state = f.state,
@@ -350,11 +350,17 @@ do -- ... whichever order the view lists the tabs in
   check("the active tab's panel wins when listed first", steps(w)[2] == "write block:p1 " .. q(PAUSE), steps(w)[2])
 end
 
-do -- a tiled block labelled rex-amq-ui is not the panel's layer (the launcher's rule)
+do -- a panel block in a layout (a move broke off there) is floated again, not opened twice
   local v = view("w1", { { id = "w1", focused = "block:a", tiled = { "block:a" } } })
   v.windows[1].layers[1].blocks[2] = { block_id = "block:t", label = "rex-amq-ui" }
-  local w = toggle({ calls = { ["session.view"] = v }, exec = function() return ran('{"layer_id":"layer:new","block_id":"block:p"}') end })
-  check("only floating layers hold the panel", steps(w)[2] == "exec " .. BIN .. " open --session " .. S, steps(w)[2])
+  local w = toggle({ calls = { ["session.view"] = v, ["session.float_block"] = { layer_id = "layer:t", revision = 4 } },
+    exec = function() return ran('{"layer_id":"layer:new","block_id":"block:p"}') end })
+  same("a panel left in the active tab's layout is floated in place", w, {
+    "session.view ",
+    "session.float_block block_id=\"block:t\" bounds={1=0.64,2=0.02,3=0.35,4=0.96}",
+    "session.set_layer_state focus=true layer_id=\"layer:t\" state=\"normal\"",
+    "write block:t " .. q(RESUME),
+  })
 end
 
 do -- a write that raises does not stop the minimize
@@ -584,6 +590,117 @@ do -- focusing fails
   local w = waiting({ exec = who('[{"handle":"a","block_id":"block:1","reasons":["stalled"]}]'),
     calls = { ["session.view"] = empty, ["session.focus_block"] = function() return nil, "not_found" end } })
   check("a failed focus is a logged failure", w.result.action == "failed" and has_log(w, "not_found"), show(w.result))
+end
+
+-- review fixes: half-done transitions ---------------------------------------------------------
+
+do -- paused, then the minimize is refused: resume it, or it stays up but frozen
+  local w = toggle({ calls = {
+    ["session.view"] = view("w1", { { id = "w1", focused = "block:p", tiled = { "block:a" }, floating = { { id = "layer:p", block = "block:p" } } } }),
+    ["session.set_layer_state"] = function() return nil, "bad_request: last visible pane" end,
+  } })
+  same("a refused minimize resumes the paused panel", w, {
+    "session.view ",
+    "write block:p " .. q(PAUSE),
+    "session.set_layer_state layer_id=\"layer:p\" state=\"minimized\"",
+    "write block:p " .. q(RESUME),
+  })
+  check("refused minimize is a failure naming why", w.result.action == "failed" and w.result.error:find("last visible pane", 1, true), show(w.result))
+end
+
+do -- the pause never arrived: nothing to undo when the minimize is refused
+  local w = toggle({ calls = {
+    ["session.view"] = view("w1", { { id = "w1", focused = "block:p", tiled = { "block:a" }, floating = { { id = "layer:p", block = "block:p" } } } }),
+    ["block.method"] = function() return nil, "not_found" end,
+    ["session.set_layer_state"] = function() return nil, "bad_request" end,
+  } })
+  check("no resume after a pause that failed", #steps(w) == 3 and w.result.action == "failed", table.concat(steps(w), " | "))
+end
+
+local one = '[{"handle":"claude-02","block_id":"block:c2","reasons":["turn_error"]}]'
+
+do -- one waiter, but the view cannot be read: no focus
+  local w = waiting({ exec = who(one), calls = { ["session.view"] = function() return nil, "session_not_found" end } })
+  same("one waiter, failed view: no focus", w, { "exec " .. BIN .. " waiting --json --session " .. S, "session.view " })
+  check("failed view is the result", w.result.action == "failed" and w.result.error:find("session_not_found", 1, true), show(w.result))
+end
+
+do -- one waiter, the panel will not minimize: no focus behind it
+  local w = waiting({ exec = who(one), calls = {
+    ["session.view"] = view("w1", { { id = "w1", focused = "block:p", tiled = { "block:a" }, floating = { { id = "layer:p", block = "block:p" } } } }),
+    ["session.set_layer_state"] = function() return nil, "bad_request" end,
+  } })
+  local got = steps(w)
+  local focused = false
+  for _, l in ipairs(got) do if l:find("^session%.focus_block") then focused = true end end
+  check("one waiter, refused minimize: no focus", not focused and w.result.action == "failed", table.concat(got, " | "))
+end
+
+-- A Rex stub whose view follows move_block and float_block, so a move that
+-- fails halfway leaves what Rex would leave.
+local function rex_with_moves(float_fails)
+  local wins = {
+    { id = "w1", focused = "block:a", tiled = { "block:a" }, floating = { { id = "layer:p", block = "block:p", bounds = { 0.06, 0.06, 0.88, 0.88 } } } },
+    { id = "w2", focused = "block:b", tiled = { "block:b" } },
+  }
+  local fails = float_fails
+  return {
+    ["session.view"] = function() return view("w2", wins) end,
+    ["session.move_block"] = function(a)
+      wins[1].floating = {}
+      wins[2].tiled[#wins[2].tiled + 1] = a.block_id
+      wins[2].labels = { [a.block_id] = "rex-amq-ui" }
+      return { created_split_id = "split:1", revision = 8 }
+    end,
+    ["session.float_block"] = function(a)
+      if fails > 0 then fails = fails - 1 return nil, "conflict" end
+      for i, b in ipairs(wins[2].tiled) do if b == a.block_id then table.remove(wins[2].tiled, i) end end
+      wins[2].floating = { { id = "layer:q", block = a.block_id, bounds = a.bounds } }
+      return { layer_id = "layer:q", revision = 9 }
+    end,
+  }
+end
+
+do -- moved into the layout, the float refused: the next toggle repairs it, never opens a second panel
+  local w = world({ calls = rex_with_moves(1), exec = function() return ran('{"layer_id":"layer:x","block_id":"block:x"}') end })
+  w.plugin.setup{ bin = BIN }
+  local first = w.actions.amqui_toggle.run({ session_id = S })
+  check("a refused float is a failure", first.action == "failed" and first.error:find("conflict", 1, true), show(first))
+  local n = #w.seq
+  local second = w.actions.amqui_toggle.run({ session_id = S })
+  local after = {}
+  for i = n + 1, #w.seq do after[#after + 1] = steps(w)[i] end
+  local want = {
+    "session.view ",
+    "session.float_block block_id=\"block:p\" bounds={1=0.64,2=0.02,3=0.35,4=0.96}",
+    "session.set_layer_state focus=true layer_id=\"layer:q\" state=\"normal\"",
+    "write block:p " .. q(RESUME),
+  }
+  local ok = #after == #want
+  for i = 1, #want do ok = ok and after[i] == want[i] end
+  check("a panel left in a layout is floated again, not opened twice", ok and second.layer_id == "layer:q",
+    "\n  got:  " .. table.concat(after, "\n        "))
+end
+
+do -- a floating panel elsewhere wins over a labelled block in this tab's layout
+  local v = view("w2", {
+    { id = "w1", focused = "block:a", tiled = { "block:a" }, floating = { { id = "layer:p", block = "block:p", state = "minimized" } } },
+    { id = "w2", focused = "block:b", tiled = { "block:b", "block:t" }, labels = { ["block:t"] = "rex-amq-ui" } } })
+  local w = toggle({ calls = { ["session.view"] = v, ["session.float_block"] = { layer_id = "layer:q", revision = 4 } } })
+  check("floating beats a stranded block", steps(w)[2] == "session.move_block anchor_block_id=\"block:b\" block_id=\"block:p\"", steps(w)[2])
+end
+
+do -- with board = true a stranded panel comes back as a Board
+  local v = view("w1", { { id = "w1", focused = "block:a", tiled = { "block:a", "block:t" }, labels = { ["block:t"] = "rex-amq-ui" } } })
+  local w = toggle({ calls = { ["session.view"] = v, ["session.float_block"] = { layer_id = "layer:t", revision = 4 } } }, { bin = BIN, board = true })
+  check("stranded panel at Board size", steps(w)[2] == "session.float_block block_id=\"block:t\" bounds={1=0.06,2=0.06,3=0.88,4=0.88}", steps(w)[2])
+end
+
+do -- a stranded panel with focus is floated again, never "minimized" (a layout cannot be)
+  local v = view("w1", { { id = "w1", focused = "block:t", tiled = { "block:a", "block:t" }, labels = { ["block:t"] = "rex-amq-ui" } } })
+  local w = toggle({ calls = { ["session.view"] = v, ["session.float_block"] = { layer_id = "layer:t", revision = 4 } } })
+  check("focused stranded panel is floated, not hidden", steps(w)[2] == "session.float_block block_id=\"block:t\" bounds={1=0.64,2=0.02,3=0.35,4=0.96}"
+    and w.result.action == "moved", steps(w)[2])
 end
 
 do -- APC bytes are exactly the panel's grammar
