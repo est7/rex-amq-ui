@@ -1,0 +1,454 @@
+package ui
+
+import (
+	"fmt"
+	"image/color"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/est7/rex-amq-ui/internal/adapter"
+)
+
+// entry is one line of a list; row is the list row it belongs to, so a
+// row may take several lines.
+type entry struct {
+	left, right []Span
+	bg          color.Color
+	row         int
+}
+
+// list draws entries into c, scrolled so the selected row's first line
+// shows.
+func list(c *canvas, es []entry, sel int) {
+	first := 0
+	for i, e := range es {
+		if e.row == sel {
+			first = i
+			break
+		}
+	}
+	for _, e := range es[scroll(first, c.left(), len(es)):] {
+		if c.full() {
+			return
+		}
+		c.addLR(e.bg, e.left, e.right)
+	}
+}
+
+// fit is untrusted text cut or padded to exactly n cells.
+func fit(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	s = ansi.Truncate(clean(s), n, "…")
+	return s + strings.Repeat(" ", max(n-ansi.StringWidth(s), 0))
+}
+
+func capsule(text string, fg, bg color.Color) Span {
+	return Span{Text: " " + text + " ", Fg: fg, Bg: bg}
+}
+
+func (m Model) overview(c *canvas) {
+	p, now := m.pal, m.now()
+	if as := m.alerts(); len(as) > 0 {
+		section(c, fmt.Sprintf("SYSTEM ALERTS  %d", len(as)), p.Red)
+		for i, a := range as {
+			icon, fg := m.alertIcon(a.kind)
+			bg := p.RedBg
+			if i == m.sel[TabOverview] {
+				bg = p.Overlay
+			}
+			c.addLR(bg, []Span{{Text: " " + icon + " ", Fg: fg, Bold: true}, {Text: a.text, Fg: p.Fg}},
+				[]Span{{Text: " " + ago(now, a.since) + " ", Fg: p.Muted}})
+		}
+		c.blank()
+	}
+	var v *adapter.SessionView
+	if m.st.Panel != nil {
+		v = m.st.Panel.View
+	}
+	if v != nil && !v.NoView() && v.Narrative != nil && v.Narrative.Text != "" {
+		c.add(Span{Text: " from narrator (" + v.Narrator + ") · " + ago(now, v.Narrative.At) + " ago", Fg: p.Muted, Italic: true})
+		lines := wrap(v.Narrative.Text, m.w-2)
+		for _, l := range lines[:min(len(lines), 6)] {
+			c.add(Span{Text: " " + l, Fg: p.Fg})
+		}
+	} else {
+		c.add(Span{Text: " No narrator summary yet.", Fg: p.Faint, Italic: true})
+	}
+	c.blank()
+	if v != nil && v.Lifecycle != nil {
+		lc := v.Lifecycle
+		spans := []Span{{Text: " Epic ", Fg: p.Muted}, {Text: orDash(lc.Name), Fg: p.Fg, Bold: true}, {Text: " "}, m.lifecycleCapsule(lc.State)}
+		if !lc.OpenedAt.IsZero() {
+			spans = append(spans, Span{Text: " since " + ago(now, lc.OpenedAt), Fg: p.Muted})
+		}
+		if lc.Crew != "" {
+			spans = append(spans, Span{Text: " · crew " + lc.Crew, Fg: p.Muted})
+		}
+		c.add(spans...)
+		c.blank()
+	}
+	if v != nil && v.HandBack != nil {
+		m.handBackCard(c, v.HandBack)
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+func (m Model) alertIcon(k alertKind) (string, color.Color) {
+	p := m.pal
+	switch k {
+	case alertWaiting:
+		return "◆", p.Yellow
+	case alertTurnError, alertDeadLetter:
+		return "✕", p.Red
+	case alertStalled:
+		return "◷", p.Orange
+	case alertBounced:
+		return "↩", p.Orange
+	}
+	return "⧗", p.Blue
+}
+
+func (m Model) lifecycleCapsule(state string) Span {
+	p := m.pal
+	switch state {
+	case "open", "opened":
+		return capsule(state, p.Green, p.GreenBg)
+	case "creating":
+		return capsule(state, p.Yellow, p.YellowBg)
+	case "closing":
+		return capsule(state, p.Orange, p.YellowBg)
+	}
+	return capsule(orDash(state), p.Muted, p.Surface)
+}
+
+// handBackCardLines is how much of a hand-back the card shows.
+const handBackCardLines = 8
+
+// handBackCard shows the hand-back's first lines with its Blocked on me
+// section picked out, pulled up when it starts past the card's end.
+func (m Model) handBackCard(c *canvas, hb *adapter.HandBack) {
+	p, bg := m.pal, m.pal.BlueBg
+	title := fmt.Sprintf(" Hand-back #%d · %s · %s ago", hb.Seq, hb.By, ago(m.now(), hb.At))
+	c.addLR(bg, []Span{{Text: title, Fg: p.Blue, Bold: true}}, []Span{{Text: "o", Fg: p.Fg, Bold: true}, {Text: " open ", Fg: p.Muted}})
+	lines := strings.Split(strings.TrimRight(hb.Body, "\n"), "\n")
+	blocked := false
+	for i, l := range lines {
+		if i >= handBackCardLines {
+			break
+		}
+		fg, bold := p.Fg, false
+		switch {
+		case blockedOnMe.MatchString(l):
+			blocked, fg, bold = true, p.Yellow, true
+		case blocked && strings.TrimSpace(l) == "", blocked && strings.HasPrefix(strings.TrimSpace(l), "#"):
+			blocked = false
+		case blocked:
+			fg = p.Yellow
+		}
+		c.addOn(bg, Span{Text: "   " + l, Fg: fg, Bold: bold})
+	}
+	if len(lines) > handBackCardLines {
+		for i := handBackCardLines; i < len(lines); i++ {
+			if blockedOnMe.MatchString(lines[i]) {
+				c.addOn(bg, Span{Text: "   … " + strings.TrimSpace(lines[i]), Fg: p.Yellow, Bold: true})
+				if i+1 < len(lines) {
+					c.addOn(bg, Span{Text: "   " + lines[i+1], Fg: p.Yellow})
+				}
+				break
+			}
+		}
+		c.addOn(bg, Span{Text: fmt.Sprintf("   … %d more lines", len(lines)-handBackCardLines), Fg: p.Muted, Italic: true})
+	}
+}
+
+func (m Model) membersView(c *canvas) {
+	p := m.pal
+	var es []entry
+	last := group(-1)
+	ms := m.members()
+	for i, a := range ms {
+		if g := m.groupOf(a); g != last {
+			last = g
+			if g == groupRetired {
+				es = append(es, entry{left: []Span{{Text: fmt.Sprintf(" ▾ Retired %d", m.retiredCount()), Fg: p.Muted, Bold: true}}, bg: p.Bg, row: -1})
+			} else {
+				es = append(es, entry{left: []Span{{Text: " " + groupNames[g], Fg: p.Muted, Bold: true}}, bg: p.Bg, row: -1})
+			}
+		}
+		es = append(es, m.memberEntry(a, i))
+	}
+	if n := m.retiredCount(); n > 0 && !m.retired {
+		es = append(es, entry{left: []Span{{Text: fmt.Sprintf(" ▸ Retired %d", n), Fg: p.Muted, Bold: true}, {Text: "  r to show", Fg: p.Faint}}, bg: p.Bg, row: -1})
+	}
+	if len(ms) == 0 && m.retiredCount() == 0 {
+		c.blank()
+		c.add(Span{Text: " No agents in this session.", Fg: p.Faint, Italic: true})
+		return
+	}
+	list(c, es, m.sel[TabMembers])
+}
+
+func (m Model) memberEntry(a adapter.Agent, i int) entry {
+	p := m.pal
+	bg := p.Bg
+	if i == m.sel[TabMembers] {
+		bg = p.Overlay
+	}
+	idx := "  "
+	if i < 9 {
+		idx = fmt.Sprintf("%d ", i+1)
+	}
+	mark := Span{Text: "  "}
+	if a.BlockID != "" && a.BlockID == m.lay.Focused {
+		mark = Span{Text: "▶ ", Fg: p.Aqua, Bold: true}
+	}
+	dot, dotFg := m.statusDot(a)
+	name := a.Handle
+	if a.Role != "" {
+		name = a.Role + "(" + a.Handle + ")"
+	}
+	retired := m.groupOf(a) == groupRetired
+	nameFg := p.Fg
+	if retired {
+		nameFg = p.Faint
+	}
+	wide := m.w >= 100
+	nameW := 26
+	if !wide {
+		nameW = 24
+	}
+	left := []Span{{Text: " " + idx, Fg: p.Faint}, mark, {Text: dot + " ", Fg: dotFg}, {Text: fit(name, nameW), Fg: nameFg, Bold: i == m.sel[TabMembers]}}
+	if retired {
+		reason := orDash(a.Lifecycle.DepartReason)
+		if a.Lifecycle.DepartedAt != nil {
+			reason += " · " + ago(m.now(), *a.Lifecycle.DepartedAt) + " ago"
+		}
+		left = append(left, Span{Text: " " + reason, Fg: p.Faint, Italic: true})
+		return entry{left: left, bg: bg, row: i}
+	}
+	model := a.Model
+	if a.Effort != "" {
+		model += "/" + a.Effort
+	}
+	left = append(left, Span{Text: " " + fit(orDash(model), 11), Fg: p.Muted})
+	if wide {
+		left = append(left, Span{Text: " " + fit(a.Tab, 10), Fg: p.Faint})
+	}
+	left = append(left, Span{Text: " " + a.Task, Fg: p.Fg})
+	return entry{left: left, right: m.badges(a), bg: bg, row: i}
+}
+
+func (m Model) statusDot(a adapter.Agent) (string, color.Color) {
+	p := m.pal
+	switch a.Activity.State {
+	case "working":
+		return "●", p.Green
+	case "blocked":
+		return "●", p.Orange
+	case "error":
+		return "●", p.Red
+	case "idle", "done":
+		return "○", p.Muted
+	}
+	return "·", p.Faint
+}
+
+func (m Model) badges(a adapter.Agent) []Span {
+	p := m.pal
+	var out []Span
+	if m.st.Panel != nil && len(m.st.Panel.Attention[a.Handle]) > 0 {
+		out = append(out, Span{Text: " !" + fmt.Sprint(len(m.st.Panel.Attention[a.Handle])), Fg: p.Red, Bold: true})
+	}
+	if a.Delivery.PendingDoorbell {
+		out = append(out, Span{Text: " ⍾", Fg: p.Yellow})
+	}
+	if n := a.Delivery.Unread; n > 0 {
+		out = append(out, Span{Text: fmt.Sprintf(" ✉%d", n), Fg: p.Yellow, Bold: true})
+	}
+	if out != nil {
+		out = append(out, Span{Text: " "})
+	}
+	return out
+}
+
+func (m Model) mailView(c *canvas) {
+	p := m.pal
+	bar := []Span{{Text: " "}}
+	switch {
+	case m.mail.typing:
+		bar = append(bar, Span{Text: "/ ", Fg: p.Blue, Bold: true}, Span{Text: m.mail.query, Fg: p.Fg}, Span{Text: "▏", Fg: p.Blue})
+	case m.mail.query != "":
+		bar = append(bar, capsule("/ "+m.mail.query, p.Blue, p.BlueBg), Span{Text: " "})
+	}
+	if m.mail.from != "" {
+		bar = append(bar, capsule("from/to "+m.mail.from, p.Aqua, p.Surface), Span{Text: " "})
+	}
+	follow := capsule("Follow", p.Faint, p.Surface)
+	if m.mail.follow {
+		follow = capsule("Follow", p.Green, p.GreenBg)
+	}
+	c.addLR(p.Bg, bar, []Span{follow, {Text: " "}})
+	rows := m.mailRows()
+	if len(rows) == 0 {
+		c.blank()
+		c.add(Span{Text: " No messages.", Fg: p.Faint, Italic: true})
+		return
+	}
+	var es []entry
+	for i, msg := range rows {
+		bg := p.Bg
+		if i == m.sel[TabMail] {
+			bg = p.Overlay
+		}
+		ex, can := m.excerpt(msg.ID)
+		open := can && m.mail.expanded[msg.ID]
+		mark := "  "
+		switch {
+		case open:
+			mark = "▾ "
+		case can:
+			mark = "▸ "
+		}
+		left := []Span{{Text: " " + fit(ago(m.now(), msg.CreatedAt), 4), Fg: p.Faint}, {Text: mark, Fg: p.Blue},
+			{Text: msg.From, Fg: p.Fg}, {Text: " → ", Fg: p.Faint}, {Text: recipients(msg), Fg: p.Fg}, {Text: " "},
+			m.mailCapsule(msg), {Text: " " + msg.Subject, Fg: p.Fg, Bold: i == m.sel[TabMail]}}
+		es = append(es, entry{left: left, bg: bg, row: i})
+		if open {
+			body := wrap(ex.Body, m.w-8)
+			for _, l := range body[:min(len(body), 6)] {
+				es = append(es, entry{left: []Span{{Text: "       " + l, Fg: p.Muted}}, bg: p.Surface, row: i})
+			}
+			if ex.Truncated || len(body) > 6 {
+				es = append(es, entry{left: []Span{{Text: "       …", Fg: p.Faint}}, bg: p.Surface, row: i})
+			}
+		}
+	}
+	list(c, es, m.sel[TabMail])
+}
+
+func (m Model) mailCapsule(msg adapter.Message) Span {
+	p := m.pal
+	switch {
+	case msg.State == adapter.MsgDeadLettered:
+		return capsule("dead_lettered", p.Red, p.RedBg)
+	case msg.Bounced:
+		return capsule("bounced", p.Orange, p.RedBg)
+	case msg.State == adapter.MsgDrained:
+		return capsule("drained", p.Green, p.GreenBg)
+	case msg.State == adapter.MsgQueued:
+		return capsule("queued", p.Yellow, p.YellowBg)
+	}
+	return capsule(orDash(msg.State), p.Blue, p.BlueBg)
+}
+
+// GraphRegion is the rectangle of the frame the Graph tab leaves to the
+// graph renderer, painted with the background until it draws there: the
+// rows between the replay bar and the legend.
+func (m Model) GraphRegion() Rect {
+	return Rect{X: 0, Y: headerLines + 1, W: max(m.w, 0), H: max(m.contentHeight()-3, 0)}
+}
+
+func (m Model) graphView(c *canvas) {
+	p := m.pal
+	msgs := m.graphMessages()
+	n := len(msgs)
+	if m.graph >= 0 {
+		n = m.graph + 1
+	}
+	live := capsule("● Live", p.Faint, p.Surface)
+	if m.graph < 0 {
+		live = capsule("● Live", p.Green, p.GreenBg)
+	}
+	hide := "○"
+	if m.hideRetired {
+		hide = "●"
+	}
+	span := ""
+	if len(msgs) > 1 {
+		span = " · " + compact(msgs[len(msgs)-1].CreatedAt.Sub(msgs[0].CreatedAt))
+	}
+	c.addLR(p.Surface,
+		[]Span{{Text: " |<  <  >  ", Fg: p.Fg, Bold: true}, live, {Text: "  Hide retired " + hide, Fg: p.Muted}},
+		[]Span{{Text: fmt.Sprintf("%d / %d messages%s ", n, len(msgs), span), Fg: p.Muted}})
+	for range m.GraphRegion().H {
+		c.blank()
+	}
+	c.add(Span{Text: " ──", Fg: p.Green}, Span{Text: " drained  ", Fg: p.Muted},
+		Span{Text: "━━", Fg: p.Yellow, Bold: true}, Span{Text: " obligation  ", Fg: p.Muted},
+		Span{Text: "┄┄", Fg: p.Faint}, Span{Text: " queued · bounced", Fg: p.Muted})
+	if len(msgs) > 0 {
+		cur := msgs[len(msgs)-1]
+		if m.graph >= 0 {
+			cur = msgs[m.graph]
+		}
+		c.add(Span{Text: " " + cur.From + " → " + recipients(cur), Fg: p.Fg}, Span{Text: " · " + cur.Subject, Fg: p.Muted})
+	}
+}
+
+// compact is d as 4m30s, 2h05m, or 3d.
+func compact(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+func (m Model) epicsView(c *canvas) {
+	p := m.pal
+	es := m.epics()
+	if len(es) == 0 {
+		c.blank()
+		c.add(Span{Text: " No Epics are linked to this personal agent yet.", Fg: p.Faint, Italic: true})
+		return
+	}
+	var out []entry
+	for i, e := range es {
+		bg := p.Bg
+		if i == m.sel[TabEpics] {
+			bg = p.Overlay
+		}
+		idx := "  "
+		if i < 9 {
+			idx = fmt.Sprintf("%d ", i+1)
+		}
+		state := ""
+		if e.Lifecycle != nil {
+			state = e.Lifecycle.State
+		}
+		var right []Span
+		if e.HandBack != nil {
+			right = append(right, capsule("hand-back", p.Blue, p.BlueBg), Span{Text: " "})
+		}
+		if e.OpenAttention > 0 {
+			right = append(right, Span{Text: fmt.Sprintf("!%d ", e.OpenAttention), Fg: p.Red, Bold: true})
+		}
+		if e.OpenObligations > 0 {
+			right = append(right, Span{Text: fmt.Sprintf("⧗%d ", e.OpenObligations), Fg: p.Blue})
+		}
+		right = append(right, Span{Text: fmt.Sprintf("%d active ", e.ActiveMembers), Fg: p.Muted})
+		out = append(out, entry{left: []Span{{Text: " " + idx, Fg: p.Faint}, {Text: orDash(e.Name), Fg: p.Fg, Bold: true}, {Text: " "}, m.lifecycleCapsule(state)}, right: right, bg: bg, row: i})
+		out = append(out, entry{left: []Span{{Text: "   " + e.Dir, Fg: p.Faint}}, bg: bg, row: i})
+		say := Span{Text: "   no narrator yet", Fg: p.Faint, Italic: true}
+		if e.Narrative != nil && e.Narrative.Text != "" {
+			say = Span{Text: "   " + e.Narrative.Text, Fg: p.Muted, Italic: true}
+		}
+		out = append(out, entry{left: []Span{say}, bg: bg, row: i})
+		out = append(out, entry{bg: p.Bg, row: i})
+	}
+	list(c, out, m.sel[TabEpics])
+}

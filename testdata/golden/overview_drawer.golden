@@ -1,0 +1,48 @@
+ auth-refresh · crew:pair                              ● Live  Drawer 
+  Overview ●5   Members 3   Mail 3   Graph                            
+ SYSTEM ALERTS  5                                                     
+ ◆ orchestrator(claude-01) is waiting on you                       3m 
+ ✕ implementer(claude-02) hit a turn error                        10m 
+ ◷ narrator(pi-04) stalled                                         9m 
+ ↩ bounced claude-01 → codex-03: review s1                         6m 
+ ⧗ claude-02 owes claude-01 a request: build it                    6m 
+                                                                      
+ from narrator (pi-04) · 4m ago                                       
+ claude-02 hit a turn error while wiring the token refresh; claude-01 
+ is waiting on it.                                                    
+                                                                      
+ Epic auth-refresh  opened  since 1h · crew pair                      
+                                                                      
+ Hand-back #1 · claude-01 · 40m ago                            o open 
+   run-goal: auth refresh                                             
+                                                                      
+   ## Blocked on me                                                   
+   - release v2 tag                                                   
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+ ↵ focus  o hand-back  ⇥ tabs  z zoom  q hide  Q quit                 
