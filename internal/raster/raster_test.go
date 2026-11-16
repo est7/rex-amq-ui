@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/est7/rex-amq-ui/internal/raster"
@@ -148,15 +149,27 @@ func TestRasterTextEmbeddedFont(t *testing.T) {
 			if got, want := f.Measure("claude-106"), 10*f.Advance; math.Abs(got-want) > 0.01 {
 				t.Errorf("monospace width %.2f, want %.2f", got, want)
 			}
+			before := slices.Clone(c.Image().Pix)
 			c.Text(raster.Point{X: 0, Y: float64(m.CellH)}, "claude-106", f, white)
-			lit := 0
-			for _, v := range c.Image().Pix {
-				if v == 0xff {
-					lit++
+			// Count pixels whose colour the text changed, inside the run the
+			// ten glyphs occupy and nowhere else.
+			inside, outside := 0, 0
+			img := c.Image()
+			for y := 0; y < img.Rect.Dy(); y++ {
+				for x := 0; x < img.Rect.Dx(); x++ {
+					o := img.PixOffset(x, y)
+					if slices.Equal(before[o:o+3], img.Pix[o:o+3]) {
+						continue
+					}
+					if x < int(f.Measure("claude-106"))+1 && y < m.CellH+m.CellH/2 {
+						inside++
+					} else {
+						outside++
+					}
 				}
 			}
-			if lit < 50 {
-				t.Errorf("text painted %d bright channels, want glyphs", lit)
+			if inside < 10*m.CellW || outside != 0 {
+				t.Errorf("text changed %d pixels in its run and %d outside it, want glyphs (at least %d) and nothing else", inside, outside, 10*m.CellW)
 			}
 			if s := f.Fit("orchestrator-of-everything", 8*f.Advance); s != "orchestr…" && s != "orchest…" {
 				t.Errorf("Fit = %q, want the text cut with an ellipsis", s)
