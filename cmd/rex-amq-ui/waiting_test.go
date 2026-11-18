@@ -14,7 +14,7 @@ import (
 )
 
 // fakeAdapter writes an adapter that prints fixture (a recorded or edited
-// `panel --json` stream) and then stays up, as the real one does, until it
+// `stream panel` stream) and then stays up, as the real one does, until it
 // is stopped. It records its argv to argsFile.
 func fakeAdapter(t *testing.T, fixture string) (bin, argsFile string) {
 	t.Helper()
@@ -30,6 +30,16 @@ func fakeAdapter(t *testing.T, fixture string) (bin, argsFile string) {
 		t.Fatal(err)
 	}
 	return bin, argsFile
+}
+
+// envelopeFixture is the absolute path of a recorded failure envelope.
+func envelopeFixture(t *testing.T, name string) string {
+	t.Helper()
+	path, err := filepath.Abs(filepath.Join("..", "..", "testdata", "envelope", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // writeAdapter writes an adapter whose whole script is body.
@@ -111,7 +121,7 @@ func TestWaitingSeveral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a := strings.TrimSpace(string(raw)); a != "panel --json --session session:s" {
+	if a := strings.TrimSpace(string(raw)); a != "stream panel --session session:s" {
 		t.Errorf("adapter argv %q", a)
 	}
 }
@@ -172,7 +182,7 @@ func TestWaitingSessionFromEnv(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	raw, _ := os.ReadFile(argsFile)
-	if a := strings.TrimSpace(string(raw)); a != "panel --json --session session:env" {
+	if a := strings.TrimSpace(string(raw)); a != "stream panel --session session:env" {
 		t.Errorf("adapter argv %q", a)
 	}
 }
@@ -184,6 +194,8 @@ func TestWaitingAdapterFails(t *testing.T) {
 		"exits":    writeAdapter(t, "echo 'panel: refused: agent pane' >&2\nexit 3\n"),
 		"garbage":  writeAdapter(t, "echo 'not json'\nexec sleep 60\n"),
 		"no-start": filepath.Join(t.TempDir(), "missing-adapter"),
+		// The v2 adapter's refusal before it connects: one envelope on stdout.
+		"refused": writeAdapter(t, "cat '"+envelopeFixture(t, "recorded-guard-denied.ndjson")+"'\nexit 6\n"),
 	}
 	for name, bin := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -200,6 +212,9 @@ func TestWaitingAdapterFails(t *testing.T) {
 			}
 			if name == "exits" && !strings.Contains(stderr, "refused: agent pane") {
 				t.Errorf("stderr %q: want the adapter's reason", stderr)
+			}
+			if name == "refused" && (!strings.Contains(stderr, "guard_denied") || !strings.Contains(stderr, "this command is the human's")) {
+				t.Errorf("stderr %q: want the envelope's code and message", stderr)
 			}
 		})
 	}

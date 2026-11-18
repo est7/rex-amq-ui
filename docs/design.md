@@ -4,7 +4,7 @@ rex-amq-ui shows one Rex session's crew to the human in a floating layer of that
 
 ## Boundaries
 
-The adapter (`rex-amq-adapter`) is the single source of truth for agents, mail, and session views. It owns every file under `~/.local/state/rex-amq-adapter/`, and rex-amq-ui reads none of them. It reads only the NDJSON that `rex-amq-adapter panel --json` writes to stdout. It acts only on its own floating layer and on the human's focus, through Rex's control API. It writes two kinds of file of its own, neither of them adapter state: the Graph tab's frame files, `/tmp/tty-graphics-protocol-rex-amq-ui-<pid>-<seq>.rgba`, and a read-only copy of a hand-back that `o` opens, `<user cache dir>/rex-amq-ui/<session>-hand-back-<seq>.md` (`os.UserCacheDir()`, which is `~/Library/Caches` on macOS), which replaces an earlier copy of the same hand-back.
+The adapter (`rex-amq-adapter`) is the single source of truth for agents, mail, and session views. It owns every file under `~/.local/state/rex-amq-adapter/`, and rex-amq-ui reads none of them. It reads only the NDJSON that `rex-amq-adapter stream panel` writes to stdout. It acts only on its own floating layer and on the human's focus, through Rex's control API. It writes two kinds of file of its own, neither of them adapter state: the Graph tab's frame files, `/tmp/tty-graphics-protocol-rex-amq-ui-<pid>-<seq>.rgba`, and a read-only copy of a hand-back that `o` opens, `<user cache dir>/rex-amq-ui/<session>-hand-back-<seq>.md` (`os.UserCacheDir()`, which is `~/Library/Caches` on macOS), which replaces an earlier copy of the same hand-back.
 
 What rex-amq-ui never does:
 
@@ -12,14 +12,14 @@ What rex-amq-ui never does:
 - It never starts, wakes, adopts, or retires an agent.
 - It never changes a repository's working tree or Git state.
 
-The adapter enforces the other side of this boundary. `panel --json` refuses an agent's pane, an agent's process tree, and `ME_UNATTENDED=1`, so only a human's terminal (the panel's own block, or the plugin's command run by the Rex server) can read it.
+The adapter enforces the other side of this boundary. `stream panel` refuses an agent's pane, an agent's process tree, and `ME_UNATTENDED=1`, so only a human's terminal (the panel's own block, or the plugin's command run by the Rex server) can read it.
 
 ## Parts
 
 ```mermaid
 flowchart LR
   subgraph Adapter["rex-amq-adapter"]
-    Panel["panel --json<br/>(NDJSON, schema 1)"]
+    Panel["stream panel<br/>(NDJSON, schema 1)"]
   end
   subgraph Rex["Rex server (control API r13)"]
     Lua["init.lua plugin<br/>amqui_toggle · amqui_waiting"]
@@ -47,7 +47,7 @@ flowchart LR
 
 | Package | Owns |
 |---|---|
-| `internal/adapter` | Finding the adapter binary (`REX_AMQ_ADAPTER_BIN`, then Homebrew, then `PATH`). Running `panel --json`, and restarting it with backoff (250 ms doubling to 10 s) when it ends, fails, writes a line that does not decode, or skips a sequence number. Decoding frames as a tolerant reader: unknown fields are ignored, and an unknown frame type or entity decodes as `Unknown`. Folding frames into `State`, an immutable projection that a snapshot replaces. |
+| `internal/adapter` | Finding the adapter binary (`REX_AMQ_ADAPTER_BIN`, then Homebrew, then `PATH`). Running `stream panel`, and restarting it with backoff (250 ms doubling to 10 s) when it ends, fails, writes a line that does not decode, or skips a sequence number. Decoding frames as a tolerant reader: unknown fields are ignored, and an unknown frame type or entity decodes as `Unknown`. Folding frames into `State`, an immutable projection that a snapshot replaces. |
 | `internal/rexctl` | A client of `rex.control.v1`: one WebSocket on the server's Unix socket, with requests, responses, and events. The panel calls Rex in 0.1–3 ms this way, where starting the `rex` CLI for each call would take about 76 ms. `rexctltest` is a fake server that validates every request against the method schemas recorded from the real server (`rexctltest/schemas`). |
 | `internal/layer` | The facts about the panel's layer: its label (`rex-amq-ui`), its two sizes (Drawer `[0.64,0.02,0.35,0.96]`, Board `[0.06,0.06,0.88,0.88]`), and the order of the calls that leave it. Creating or restoring the layer (`Open`, used by `open`). From inside the panel: zoom, minimize, jump to a pane or to another session, and follow focus, owner, size, and the layer id (`Panel.Watch`). |
 | `internal/apc` | Taking the private `ESC _ amqui;… ESC \` sequences out of the panel's stdin, wherever reads split them. A 32-byte payload cap (the part after `ESC _ amqui;`) bounds a sequence. A lone `ESC` that waits more than 40 ms counts as the Esc key. |
@@ -66,7 +66,7 @@ The plugin undoes a transition it leaves half done. If Rex refuses to minimize a
 ## Data flow
 
 1. **Opening.** `rex-amq-ui open` attaches to the session and looks for the panel. When there is none, it measures a tiled block of the active tab (`com.superlogical.terminal.size`), works out the terminal size the layer's bounds will give, and creates the layer with `session.new_layer` and `options.size`. Without that size the first frame would be 80×24. It then calls `session.disown_block`, so the Rex app sizes the block from then on. The panel's command line is `rex-amq-ui [--adapter-bin P] --session S --focus <pane> [--tab T] [--board]`, run with `shell: "none"`.
-2. **Streaming.** The panel runs the adapter and folds its frames. A restart's snapshot resynchronises everything. While the adapter is down, the header shows `◌ Reconnecting` and the last state stays on screen.
+2. **Streaming.** The panel runs the adapter and folds its frames. A restart's snapshot resynchronises everything. Before its snapshot, a run may instead write one v:2 failure envelope (`{"ok":false,"v":2,"error":{…}}`) and exit non-zero; the stream reads that line as an `EnvelopeError` (code, message, next action) rather than as a frame. After the snapshot, every line is a `schema: 1` frame, and an envelope there is a frame that does not decode. While the adapter is down, the header shows `◌ Reconnecting` and the last state stays on screen.
 3. **Following Rex.** `Panel.Watch` keeps a control connection, reconnects with a fresh `session.attach`, and turns `session_view_changed` (fetching a newer view when the revision goes up) and `block_owner_changed` into a `layer.State`: the pane the human focused outside the panel (`▶`), the block's owner, whether the layer is minimized, and its size. After a move, Watch finds the panel's new layer id in the view on its own. While the control connection is down, the header shows `◌ Rex` and the panel's actions say it is not connected. Without `REX_SERVER` or a session, the panel still shows the stream.
 4. **Acting.** `Enter` on a member minimizes the panel first and then calls `session.focus_block`, which also switches tabs. `Enter` on an Epic first calls `client.perform` of `session.select` on the Rex app, and minimizes only if that succeeds. With Remote Control off the app answers `refused`, and the panel stays up with a footer hint.
 5. **The plugin.** See the README's toggle table. `amqui_waiting` runs `rex-amq-ui waiting --json`, which takes only the adapter's first snapshot (5 s at most, with no retry, since a key press is waiting on it) and always stops the adapter before it exits.

@@ -1,6 +1,7 @@
-// Package adapter reads `rex-amq-adapter panel --json`: it finds the adapter
+// Package adapter reads `rex-amq-adapter stream panel`: it finds the adapter
 // binary, runs the stream and restarts it when it ends (Stream), decodes its
-// NDJSON frames (DecodeFrame), and folds them into the panel's projection
+// NDJSON frames (DecodeFrame), the failure envelope a refused run starts
+// with (EnvelopeError), and folds the frames into the panel's projection
 // (State). The adapter owns every state file; this package reads only its
 // stdout and never sends, reads, or marks mail.
 //
