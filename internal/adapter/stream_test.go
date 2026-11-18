@@ -367,7 +367,8 @@ func envelopeAdapter(t *testing.T, fixture string, code int) string {
 	return script
 }
 
-// firstEnd runs s until its first run ends and returns that Reconnecting.
+// firstEnd runs s until its first run ends and returns that Reconnecting or
+// Refused.
 func firstEnd(t *testing.T, s *Stream) StatusUpdate {
 	t.Helper()
 	out := make(chan Update, 16)
@@ -380,7 +381,7 @@ func firstEnd(t *testing.T, s *Stream) StatusUpdate {
 		case u := <-out:
 			switch u := u.(type) {
 			case StatusUpdate:
-				if u.Status == Reconnecting {
+				if u.Status == Reconnecting || u.Status == Refused {
 					return u
 				}
 				if u.Status == Connected {
@@ -400,6 +401,9 @@ func firstEnd(t *testing.T, s *Stream) StatusUpdate {
 // action, not as a frame of an unsupported schema.
 func TestPreConnectEnvelope(t *testing.T) {
 	u := firstEnd(t, &Stream{Bin: envelopeAdapter(t, "recorded-guard-denied.ndjson", 6), Env: []string{"PATH=/usr/bin:/bin"}})
+	if u.Status != Refused {
+		t.Fatalf("status %v, want refused", u.Status)
+	}
 	var refusal *EnvelopeError
 	if !errors.As(u.Err, &refusal) {
 		t.Fatalf("ended with %v, want an *EnvelopeError", u.Err)
@@ -419,6 +423,9 @@ func TestPreConnectEnvelope(t *testing.T) {
 // command the adapter suggests, into the status.
 func TestPreConnectUsage(t *testing.T) {
 	u := firstEnd(t, &Stream{Bin: envelopeAdapter(t, "recorded-usage.ndjson", 2), Env: []string{"PATH=/usr/bin:/bin"}})
+	if u.Status != Refused {
+		t.Fatalf("status %v, want refused", u.Status)
+	}
 	var refusal *EnvelopeError
 	if !errors.As(u.Err, &refusal) {
 		t.Fatalf("ended with %v, want an *EnvelopeError", u.Err)
@@ -553,4 +560,64 @@ func TestStreamRunsARealProcess(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A refusal the adapter marks retryable:false (both recorded fixtures) is
+// final: Run reports it as Refused and returns, and starts no other run with
+// the same arguments (spec §3.4: a usage error is not retried unchanged).
+func TestPreConnectRefusalIsNotRetried(t *testing.T) {
+	for _, fixture := range []string{"recorded-guard-denied.ndjson", "recorded-usage.ndjson"} {
+		t.Run(fixture, func(t *testing.T) {
+			line, err := os.ReadFile(filepath.Join("..", "..", "testdata", "envelope", fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, &Stream{Bin: "a"})
+			h.status(Connecting)
+			p := h.proc()
+			go func() {
+				io.WriteString(p.w, string(line))
+				p.exit(errors.New("exit status 6"))
+			}()
+			u := h.status(Refused)
+			var refusal *EnvelopeError
+			if !errors.As(u.Err, &refusal) || refusal.Retryable || u.RetryIn != 0 {
+				t.Fatalf("refused with %#v", u)
+			}
+			select {
+			case err := <-h.done:
+				if err != nil {
+					t.Fatalf("Run returned %v", err)
+				}
+				h.done <- nil // for the cleanup
+			case <-time.After(wait):
+				t.Fatal("Run kept going after a final refusal")
+			}
+			select {
+			case tm := <-h.timers:
+				t.Fatalf("a backoff of %v started", tm.d)
+			default:
+			}
+			h.noProc()
+		})
+	}
+}
+
+// A refusal marked retryable:true is retried after a backoff, like any run
+// that ended.
+func TestPreConnectRetryableRefusalIsRetried(t *testing.T) {
+	h := newHarness(t, &Stream{Bin: "a"})
+	h.status(Connecting)
+	p := h.proc()
+	go func() {
+		io.WriteString(p.w, `{"ok":false,"v":2,"data":null,"error":{"code":"rex_unavailable","message":"rex is not running","retryable":true,"next_action":null}}`+"\n")
+		p.exit(errors.New("exit status 1"))
+	}()
+	u := h.status(Reconnecting)
+	var refusal *EnvelopeError
+	if !errors.As(u.Err, &refusal) || refusal.Code != "rex_unavailable" || !refusal.Retryable || u.RetryIn == 0 {
+		t.Fatalf("reconnecting with %#v", u)
+	}
+	h.timer().ch <- time.Now()
+	h.proc()
 }
