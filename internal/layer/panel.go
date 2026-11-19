@@ -164,13 +164,8 @@ func (p *Panel) Jump(ctx context.Context, block string) error {
 	return err
 }
 
-// SwitchTo asks the Rex app to show session, then minimizes the panel. On
-// ErrRemoteControlOff or ErrNoApp the panel stays up to say so.
-func (p *Panel) SwitchTo(ctx context.Context, session string) error {
-	c, _, err := p.client()
-	if err != nil {
-		return err
-	}
+// selectSession asks the connected Rex app to show session.
+func (p *Panel) selectSession(ctx context.Context, c *rexctl.Client, session string) error {
 	apps, err := c.AppClients(ctx)
 	if err != nil {
 		return err
@@ -182,6 +177,52 @@ func (p *Panel) SwitchTo(ctx context.Context, session string) error {
 		if rexctl.IsCode(err, rexctl.CodeRefused) {
 			return ErrRemoteControlOff
 		}
+		return err
+	}
+	return nil
+}
+
+// SwitchTo asks the Rex app to show session, then minimizes the panel. On
+// ErrRemoteControlOff or ErrNoApp the panel stays up to say so.
+func (p *Panel) SwitchTo(ctx context.Context, session string) error {
+	c, _, err := p.client()
+	if err != nil {
+		return err
+	}
+	if err := p.selectSession(ctx, c, session); err != nil {
+		return err
+	}
+	return p.Minimize(ctx)
+}
+
+// JumpToSession switches the Rex app to session, focuses block inside that
+// session, and minimizes the panel in its own session. When session is
+// empty or matches the panel's session, it falls back to Jump. On
+// ErrRemoteControlOff or ErrNoApp the panel stays up without touching
+// session.
+func (p *Panel) JumpToSession(ctx context.Context, session, block string) error {
+	if session == "" || session == p.session {
+		return p.Jump(ctx, block)
+	}
+	c, _, err := p.client()
+	if err != nil {
+		return err
+	}
+	if err := p.selectSession(ctx, c, session); err != nil {
+		return err
+	}
+	// session.focus_block requires a connection attached to session; dial a
+	// short-lived client so the panel's own connection stays attached only
+	// to p.session.
+	target, err := rexctl.Dial(ctx, p.server)
+	if err != nil {
+		return err
+	}
+	defer target.Close()
+	if _, err := target.Attach(ctx, session); err != nil {
+		return err
+	}
+	if _, err := target.FocusBlock(ctx, session, block); err != nil {
 		return err
 	}
 	return p.Minimize(ctx)
