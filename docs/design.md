@@ -12,7 +12,7 @@ What rex-amq-ui never does:
 - It never starts, wakes, adopts, or retires an agent.
 - It never changes a repository's working tree or Git state.
 
-The adapter enforces the other side of this boundary. `stream panel` refuses an agent's pane, an agent's process tree, and `ME_UNATTENDED=1`, so only a human's terminal (the panel's own block, or the plugin's command run by the Rex server) can read it.
+The adapter enforces the other side of this boundary. `stream panel` refuses a harness session's environment (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `PI_SESSION_ID`, `ANTIGRAVITY_CONVERSATION_ID`), an agent's pane, an agent's process tree, and `ME_UNATTENDED=1`, so only a human's terminal (the panel's own block, or the plugin's command run by the Rex server) can read it. Its refusal is a `guard_denied` failure envelope with `retryable:false` (see Data flow, Streaming).
 
 ## Parts
 
@@ -47,7 +47,7 @@ flowchart LR
 
 | Package | Owns |
 |---|---|
-| `internal/adapter` | Finding the adapter binary (`REX_AMQ_ADAPTER_BIN`, then Homebrew, then `PATH`). Running `stream panel`, and restarting it with backoff (250 ms doubling to 10 s) when it ends, fails, writes a line that does not decode, or skips a sequence number. Decoding frames as a tolerant reader: unknown fields are ignored, and an unknown frame type or entity decodes as `Unknown`. Folding frames into `State`, an immutable projection that a snapshot replaces. |
+| `internal/adapter` | Finding the adapter binary (`REX_AMQ_ADAPTER_BIN`, then Homebrew, then `PATH`). Running `stream panel`, and restarting it with backoff (250 ms doubling to 10 s) when it ends, fails, writes a line that does not decode, or skips a sequence number. Reading the v:2 failure envelope (`{"ok":false,"v":2,"error":{…}}`) a run may write before its snapshot as an `EnvelopeError` (`envelope.go`), and ending the stream without a restart (`Refused`) when the envelope says `retryable:false`. Decoding frames as a tolerant reader: unknown fields are ignored, and an unknown frame type or entity decodes as `Unknown`. Folding frames into `State`, an immutable projection that a snapshot replaces. |
 | `internal/rexctl` | A client of `rex.control.v1`: one WebSocket on the server's Unix socket, with requests, responses, and events. The panel calls Rex in 0.1–3 ms this way, where starting the `rex` CLI for each call would take about 76 ms. `rexctltest` is a fake server that validates every request against the method schemas recorded from the real server (`rexctltest/schemas`). |
 | `internal/layer` | The facts about the panel's layer: its label (`rex-amq-ui`), its two sizes (Drawer `[0.64,0.02,0.35,0.96]`, Board `[0.06,0.06,0.88,0.88]`), and the order of the calls that leave it. Creating or restoring the layer (`Open`, used by `open`). From inside the panel: zoom, minimize, jump to a pane or to another session, and follow focus, owner, size, and the layer id (`Panel.Watch`). |
 | `internal/apc` | Taking the private `ESC _ amqui;… ESC \` sequences out of the panel's stdin, wherever reads split them. A 32-byte payload cap (the part after `ESC _ amqui;`) bounds a sequence. A lone `ESC` that waits more than 40 ms counts as the Esc key. |
