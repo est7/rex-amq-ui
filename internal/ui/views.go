@@ -75,6 +75,10 @@ func (m Model) listEntries(t Tab) ([]entry, int) {
 		return m.mailEntries(), max(m.contentHeight()-1, 0)
 	case TabEpics:
 		return m.epicsEntries(), m.contentHeight()
+	case TabGraph:
+		if m.graphUsesTUI() {
+			return m.graphTUIEntries(), m.GraphRegion().H
+		}
 	}
 	return nil, 0
 }
@@ -654,11 +658,20 @@ func (m Model) graphView(c *canvas) {
 	if len(msgs) > 1 {
 		span = " · " + compact(msgs[len(msgs)-1].CreatedAt.Sub(msgs[0].CreatedAt))
 	}
+	modeCap := capsule("Kitty", p.Green, p.GreenBg)
+	if m.graphUsesTUI() {
+		modeCap = capsule("TUI", p.Aqua, p.Overlay)
+	}
 	c.addLR(p.Surface,
-		[]Span{{Text: " |<  <  >  ", Fg: p.Fg, Bold: true}, live, {Text: "  Hide retired " + hide, Fg: p.Muted}},
+		[]Span{{Text: " |<  <  >  ", Fg: p.Fg, Bold: true}, live, {Text: "  Hide retired " + hide + "  ", Fg: p.Muted}, modeCap},
 		[]Span{{Text: fmt.Sprintf("%d / %d messages%s ", at+1, len(msgs), span), Fg: p.Muted}})
-	for range m.GraphRegion().H {
-		c.blank()
+	regH := m.GraphRegion().H
+	if m.graphUsesTUI() {
+		m.renderGraphTUI(c, regH)
+	} else {
+		for range regH {
+			c.blank()
+		}
 	}
 	c.add(Span{Text: " ──", Fg: p.Green}, Span{Text: " drained  ", Fg: p.Muted},
 		Span{Text: "━━", Fg: p.Yellow, Bold: true}, Span{Text: " obligation  ", Fg: p.Muted},

@@ -167,6 +167,7 @@ type Model struct {
 	// list is Live.
 	graphAt     string
 	hideRetired bool
+	graphTUI    bool
 	// gfx is the Graph tab's image; nil without Deps.Graphics.
 	gfx *graphTab
 }

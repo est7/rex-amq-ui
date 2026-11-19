@@ -38,13 +38,13 @@ func (m Model) mouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Button {
 	case tea.MouseWheelUp:
-		if m.tab == TabGraph {
+		if m.tab == TabGraph && !m.graphUsesTUI() {
 			m.graphKey("[")
 		} else {
 			m.move(-1)
 		}
 	case tea.MouseWheelDown:
-		if m.tab == TabGraph {
+		if m.tab == TabGraph && !m.graphUsesTUI() {
 			m.graphKey("]")
 		} else {
 			m.move(1)
@@ -63,6 +63,11 @@ func (m Model) clickableList() (es []entry, top, height int) {
 		return m.memberEntries(), borderWidth + headerLines, m.contentHeight()
 	case TabMail:
 		return m.mailEntries(), borderWidth + headerLines + 1, max(m.contentHeight()-1, 0)
+	case TabGraph:
+		if m.graphUsesTUI() {
+			r := m.GraphRegion()
+			return m.graphTUIEntries(), r.Y, r.H
+		}
 	}
 	return nil, 0, 0
 }
@@ -115,6 +120,16 @@ func (m Model) mouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if row != m.sel[m.tab] {
 		m.sel[m.tab] = row
 		m.scroll[m.tab] = 0
+	}
+	if m.tab == TabGraph && m.graphUsesTUI() {
+		if h := m.selectedGraphHandle(); h != "" {
+			for i, a := range m.members() {
+				if a.Handle == h {
+					m.sel[TabMembers] = i
+					break
+				}
+			}
+		}
 	}
 	now := m.now()
 	if !m.lastClick.at.IsZero() && m.lastClick.tab == m.tab && m.lastClick.row == row &&

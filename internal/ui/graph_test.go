@@ -240,9 +240,26 @@ func TestGraphTabShowsFrameInRegion(t *testing.T) {
 
 func TestGraphTabTextFrameUnchanged(t *testing.T) {
 	with := shown(t, &cellRecorder{w: cw, h: ch}).m
+	r := with.GraphRegion()
+	ls := lines(with.Frame())
+	if !strings.Contains(ls[3], "Kitty") {
+		t.Fatalf("active Kitty graph bar missing Kitty mode badge: %q", ls[3])
+	}
+	for y := r.Y; y < r.Y+r.H; y++ {
+		if ls[y] != "│"+strings.Repeat(" ", boardW-2)+"│" {
+			t.Fatalf("active Kitty graph region row %d not framed blank: %q", y, ls[y])
+		}
+	}
 	without := step(t, build(t, "edited-crew-attention", boardW, boardH, Deps{}, Options{}), mustTab("graph"))
-	if with.Frame() != without.Frame() {
-		t.Errorf("the Graph tab's cells change when the image is on: the region must stay background")
+	if !without.graphUsesTUI() {
+		t.Fatal("Graph without Deps.Graphics did not fall back to TUI mode")
+	}
+	if bad := holes(without.Frame(), boardW, boardH); bad != nil {
+		t.Fatalf("TUI Graph holes: %v", bad)
+	}
+	f := plain(without.Frame())
+	if !strings.Contains(f, "TUI") || !strings.Contains(f, "orchestrator(claude-01)") || !strings.Contains(f, "━━▶") {
+		t.Fatalf("fallback TUI graph missing expected topology:\n%s", f)
 	}
 }
 
@@ -478,34 +495,217 @@ func TestGraphTabResizeRedraws(t *testing.T) {
 }
 
 // TestGraphTabUnreadFramesBounded: a terminal that never reads frame files
-// costs at most kitty.MaxUnread of them and says so; one that reads keeps
-// none behind.
+// emits at most kitty.MaxUnread frames, then falls back cleanly to live TUI
+// topology on ErrBacklog — clearing the frozen Kitty image, removing stale
+// frame files, stopping the tick loop, and re-arming SGR cell mouse — and
+// lets `t` retry Kitty once the terminal can read again.
 func TestGraphTabUnreadFramesBounded(t *testing.T) {
 	stuck := newTerm()
 	stuck.reads = false
 	r := panelOn(t, "edited-crew-attention", &cellRecorder{w: cw, h: ch}, stuck)
 	r.send(mustTab("graph"), 40)
 	dir := r.m.deps.Graphics.Dir
-	files, _ := filepath.Glob(filepath.Join(dir, "*.rgba"))
-	if len(files) != kitty.MaxUnread {
-		t.Errorf("%d frame files with a terminal that never reads, want %d", len(files), kitty.MaxUnread)
+	if len(stuck.seqs) != kitty.MaxUnread {
+		t.Errorf("sent %d frames to non-reading terminal, want %d before ErrBacklog fallback", len(stuck.seqs), kitty.MaxUnread)
 	}
-	if !strings.Contains(r.m.hint, "not read") || !r.m.hintBad {
-		t.Errorf("hint %q: the stalled image must be visible as a failure", r.m.hint)
+	if !r.m.graphUsesTUI() || !r.m.gfx.stalled {
+		t.Fatalf("expected automatic TUI fallback after ErrBacklog: usesTUI=%v stalled=%v", r.m.graphUsesTUI(), r.m.gfx.stalled)
 	}
-	for _, f := range files {
-		os.Remove(f)
+	if !stuck.blank() {
+		t.Fatalf("ErrBacklog fallback did not clear Kitty image and pixel mouse: %s", stuck)
 	}
+	if files, _ := filepath.Glob(filepath.Join(dir, "*.rgba")); len(files) != 0 {
+		t.Errorf("ErrBacklog fallback left %d stale frame files, want 0", len(files))
+	}
+	if len(r.held) != 0 {
+		t.Errorf("ErrBacklog fallback left %d pending ticks, want 0", len(r.held))
+	}
+	if got := r.m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("after ErrBacklog fallback MouseMode = %v, want MouseModeCellMotion", got)
+	}
+	if !strings.Contains(r.m.hint, "TUI") || !r.m.hintBad {
+		t.Errorf("hint %q (bad=%v): expected TUI fallback hint", r.m.hint, r.m.hintBad)
+	}
+	if f := plain(r.m.Frame()); !strings.Contains(f, "TUI") || !strings.Contains(f, "orchestrator(claude-01)") {
+		t.Errorf("TUI topology not rendered after ErrBacklog fallback:\n%s", f)
+	}
+
+	// Once the terminal reads again, pressing `t` retries Kitty mode cleanly.
+	stuck.reads = true
 	before := len(stuck.seqs)
-	r.run(6)
-	if len(stuck.seqs) == before {
-		t.Errorf("no frame after the terminal caught up")
+	r.send(key("t"), 12)
+	if r.m.graphUsesTUI() || !stuck.showing() || len(stuck.seqs) == before {
+		t.Errorf("t retry after terminal recovers: usesTUI=%v term=%s seqs=%d->%d", r.m.graphUsesTUI(), stuck, before, len(stuck.seqs))
 	}
 
 	r = shown(t, &cellRecorder{w: cw, h: ch})
 	r.run(40)
 	if files, _ := filepath.Glob(filepath.Join(r.m.deps.Graphics.Dir, "*.rgba")); len(files) != 0 {
 		t.Errorf("a reading terminal left %d frame files", len(files))
+	}
+}
+
+func TestGraphTabToggleTUIMode(t *testing.T) {
+	r := shown(t, &cellRecorder{w: cw, h: ch})
+	if r.m.graphUsesTUI() || !r.term.showing() {
+		t.Fatalf("expected active Kitty graph: usesTUI=%v term=%s", r.m.graphUsesTUI(), r.term)
+	}
+	// Toggle to TUI mode: clears Kitty image, disables pixel mouse, leaves 0
+	// frame files, re-arms SGR cell mouse, and renders Unicode topology.
+	out := r.send(key("t"), 12)
+	if !r.m.graphUsesTUI() || out != clearOff || !r.term.blank() {
+		t.Fatalf("t to TUI: usesTUI=%v out=%q term=%s", r.m.graphUsesTUI(), out, r.term)
+	}
+	if got := r.m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Fatalf("TUI Graph MouseMode = %v, want MouseModeCellMotion", got)
+	}
+	if files, _ := filepath.Glob(filepath.Join(r.m.deps.Graphics.Dir, "*.rgba")); len(files) != 0 {
+		t.Fatalf("TUI mode left %d frame files", len(files))
+	}
+	if bad := holes(r.m.Frame(), boardW, boardH); bad != nil {
+		t.Fatalf("TUI Graph holes: %v", bad)
+	}
+	// Toggle back to Kitty mode.
+	r.send(key("t"), 12)
+	if r.m.graphUsesTUI() || !r.term.showing() {
+		t.Fatalf("t back to Kitty: usesTUI=%v term=%s", r.m.graphUsesTUI(), r.term)
+	}
+	if got := r.m.View().MouseMode; got != tea.MouseModeNone {
+		t.Fatalf("Kitty Graph MouseMode = %v, want MouseModeNone", got)
+	}
+}
+
+func TestGraphTUIManyMembersNoCollapse(t *testing.T) {
+	now := time.Date(2026, 11, 16, 9, 10, 0, 0, time.UTC)
+	depAt := now.Add(-15 * time.Minute)
+	agents := []adapter.Agent{
+		{Handle: "orch-01", Role: "orchestrator", BlockID: "block:orch-01", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "working"}},
+		{Handle: "impl-01", Role: "implementer", BlockID: "block:impl-01", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "working"}},
+		{Handle: "impl-02", Role: "implementer", BlockID: "block:impl-02", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "working"}},
+		{Handle: "impl-03", Role: "implementer", BlockID: "block:impl-03", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "idle"}},
+		{Handle: "impl-04", Role: "implementer", BlockID: "block:impl-04", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "blocked"}},
+		{Handle: "rev-01", Role: "reviewer", BlockID: "block:rev-01", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "working"}},
+		{Handle: "rev-02", Role: "reviewer", BlockID: "block:rev-02", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "idle"}},
+		{Handle: "nar-01", Role: "narrator", BlockID: "block:nar-01", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "working"}},
+		{Handle: "ops-01", Role: "ops", BlockID: "block:ops-01", Pane: "present",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive}, Activity: adapter.Activity{State: "idle"}},
+		{Handle: "old-01", Role: "implementer", BlockID: "block:old-01", Pane: "gone",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeDeparted, DepartedAt: &depAt, DepartReason: "retired"}},
+	}
+	msgs := []adapter.Message{
+		{ID: "m1", From: "orch-01", To: []string{"impl-01"}, Subject: "s1", State: adapter.MsgDrained, CreatedAt: now.Add(-5 * time.Minute)},
+		{ID: "m2", From: "impl-01", To: []string{"rev-01"}, Subject: "review s1", State: adapter.MsgQueued, CreatedAt: now.Add(-4 * time.Minute)},
+		{ID: "m3", From: "impl-02", To: []string{"ops-01"}, Subject: "deploy check", State: adapter.MsgQueued, Bounced: true, CreatedAt: now.Add(-3 * time.Minute)},
+		{ID: "m4", From: "orch-01", To: []string{"impl-04"}, Subject: "unblock", State: adapter.MsgDrained, CreatedAt: now.Add(-2 * time.Minute)},
+		{ID: "m5", From: "ops-01", To: []string{"old-01"}, Subject: "goodbye", State: adapter.MsgDrained, CreatedAt: now.Add(-1 * time.Minute)},
+	}
+	snap := adapter.Snapshot{
+		Header:   adapter.Header{Schema: 1, Stream: "big-stream", Seq: 1, Type: "snapshot", At: now},
+		Scope:     adapter.Scope{Kind: "session", SessionID: "session:big"},
+		Agents:    agents,
+		Messages:  msgs,
+		Panel: &adapter.Panel{
+			SessionLabel: "big-crew",
+			Crew:         &adapter.Crew{Crew: "swarm", Lead: "orchestrator"},
+			View: &adapter.SessionView{
+				Obligations: []adapter.Obligation{
+					{Ref: "m4", OwedBy: "impl-04", OwedTo: "orch-01", Kind: "request", Subject: "unblock", State: "open"},
+				},
+			},
+		},
+	}
+
+	rec := &recorder{}
+	w, h := refSize(t, layer.Board)
+	m := New(Deps{Clock: movingClock{&now}, Layer: rec}, Options{Tab: "graph", Size: layer.Board})
+	m = step(t, m, tea.WindowSizeMsg{Width: w, Height: h})
+	m = step(t, m, adapter.StatusUpdate{Status: adapter.Connected})
+	m = step(t, m, layer.State{Connected: true, Size: layer.Board})
+	m = step(t, m, adapter.FrameUpdate{Frame: snap})
+
+	if !m.graphUsesTUI() {
+		t.Fatal("expected TUI mode with nil Graphics")
+	}
+	if got := len(m.graphTUINodes()); got != 10 {
+		t.Fatalf("graphTUINodes count = %d, want 10 (9 live + 1 retired, no MaxActive=6 cap)", got)
+	}
+	frame := m.Frame()
+	if bad := holes(frame, w, h); bad != nil {
+		t.Fatalf("Board holes: %v", bad)
+	}
+	text := plain(frame)
+	// Every single live member (all 9!) and the retired member must be visible
+	// with zero opaque "+N" collapsing.
+	for _, a := range agents {
+		if !strings.Contains(text, a.Handle) {
+			t.Errorf("member %q missing from >6 member TUI Graph:\n%s", a.Handle, text)
+		}
+	}
+	if strings.Contains(text, "+3") || strings.Contains(text, "+4") {
+		t.Errorf("TUI Graph collapsed members into +N:\n%s", text)
+	}
+	for _, want := range []string{"──▶", "━━▶", "┄┄▶", "◆", "TUI"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("TUI Graph missing %q:\n%s", want, text)
+		}
+	}
+
+	// Hide retired removes old-01 and its edge.
+	m = press(t, m, "h")
+	if got := len(m.graphTUINodes()); got != 9 {
+		t.Fatalf("after h: nodes = %d, want 9 live members", got)
+	}
+	if strings.Contains(plain(m.Frame()), "old-01") {
+		t.Errorf("old-01 still shown after h")
+	}
+
+	// j/k/wheel scroll and select; Enter focuses the selected member's pane.
+	m = press(t, m, "j")
+	target := m.selectedGraphHandle()
+	if target == "" || target == "orch-01" {
+		t.Fatalf("j did not advance selection: got %q", target)
+	}
+	m = sendMsg(t, m, wheel(tea.MouseWheelDown))
+	target2 := m.selectedGraphHandle()
+	if target2 == target {
+		t.Fatalf("wheel down did not advance selection past %q", target)
+	}
+	m = press(t, m, "enter")
+	if got := strings.Join(rec.got(), ","); !strings.Contains(got, "jump block:"+target2) {
+		t.Fatalf("Enter in TUI Graph: calls=%v, want jump block:%s", rec.got(), target2)
+	}
+
+	// Resume and verify click selects + double-click focuses + Drawer/small sizes pass holes.
+	m = step(t, m, apc.Command{Verb: apc.Resume})
+	es := m.graphTUIEntries()
+	first0, _ := rowBounds(es, 0)
+	start := listStart(es, m.sel[TabGraph], m.scroll[TabGraph], m.GraphRegion().H)
+	y0 := m.GraphRegion().Y + (first0 - start)
+	m = sendMsg(t, m, leftClick(5, y0))
+	if m.sel[TabGraph] != 0 {
+		t.Fatalf("click node 0: sel=%d, want 0", m.sel[TabGraph])
+	}
+	now = now.Add(150 * time.Millisecond)
+	m = sendMsg(t, m, leftClick(5, y0))
+	if got := strings.Join(rec.got(), ","); !strings.Contains(got, "jump block:orch-01") {
+		t.Fatalf("double-click node 0: calls=%v, want jump block:orch-01", rec.got())
+	}
+
+	// Check paint holes at Drawer and tiny sizes too.
+	for _, sz := range [][2]int{{84, 48}, {40, 12}, {10, 6}, {2, 2}, {0, 0}} {
+		ms := step(t, m, apc.Command{Verb: apc.Resume})
+		ms = step(t, ms, tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
+		if bad := holes(ms.Frame(), sz[0], sz[1]); bad != nil {
+			t.Errorf("TUI Graph %dx%d holes: %v", sz[0], sz[1], bad)
+		}
 	}
 }
 

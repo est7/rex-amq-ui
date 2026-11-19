@@ -214,7 +214,7 @@ func (m Model) footer(c *canvas) {
 	case TabMail:
 		keys = []string{"/ search", "p filter", "f follow", "␣ excerpt", "o open"}
 	case TabGraph:
-		keys = []string{"[ ] replay", "L live", "h hide retired"}
+		keys = []string{"[ ] replay", "L live", "h hide retired", "t mode"}
 	}
 	if m.DrilledDown() {
 		keys = append(keys, "s switch", "esc back", "⇥ tabs", "z zoom", "Q quit")

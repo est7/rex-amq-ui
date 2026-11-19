@@ -288,6 +288,12 @@ func (m Model) enter() (tea.Model, tea.Cmd) {
 		return m.drillDown()
 	case TabMail:
 		m.toggleExcerpt()
+	case TabGraph:
+		if m.graphUsesTUI() {
+			if handle := m.selectedGraphHandle(); handle != "" {
+				return m, m.focus(handle)
+			}
+		}
 	}
 	return m, nil
 }
@@ -395,6 +401,23 @@ func (m *Model) graphKey(s string) {
 		m.hideRetired = !m.hideRetired
 		if _, ok := m.replayIndex(); !ok {
 			m.graphAt = ""
+		}
+		m.sel[TabGraph] = clampSel(m.sel[TabGraph], m.rowCount(TabGraph))
+		m.scroll[TabGraph] = 0
+	case "t":
+		if m.graphUsesTUI() {
+			m.graphTUI = false
+			if m.gfx != nil {
+				m.gfx.stalled = false
+				m.gfx.dirty = true
+				if !m.gfx.cell.Valid() {
+					m.hint = "graph: Kitty image unavailable (no cell metrics); using TUI"
+				}
+			} else {
+				m.hint = "graph: Kitty image unavailable; using TUI"
+			}
+		} else {
+			m.graphTUI = true
 		}
 	}
 }
