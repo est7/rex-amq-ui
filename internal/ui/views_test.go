@@ -389,6 +389,39 @@ func TestKeys(t *testing.T) {
 			t.Fatalf("calls %v", rec.got())
 		}
 	})
+	t.Run("zoom persists size to CacheDir on z and apc zoom", func(t *testing.T) {
+		dir := t.TempDir()
+		rec := &recorder{}
+		m := build(t, "edited-crew-attention", w, h, Deps{Layer: rec, CacheDir: dir}, Options{})
+		m = press(t, m, "z")
+		if got, ok := layer.LoadSize(dir); !ok || got != layer.Board {
+			t.Fatalf("after z: persisted (%v, %v), want (Board, true)", got, ok)
+		}
+		next, cmd := m.Update(apc.Command{Verb: apc.Zoom})
+		m = drain(t, next.(Model), cmd)
+		if got, ok := layer.LoadSize(dir); !ok || got != layer.Drawer {
+			t.Fatalf("after apc zoom: persisted (%v, %v), want (Drawer, true)", got, ok)
+		}
+
+		// Failed resize must not overwrite persisted size.
+		failRec := &recorder{fail: map[string]error{"resize": errors.New("boom")}}
+		m2 := build(t, "edited-crew-attention", w, h, Deps{Layer: failRec, CacheDir: dir}, Options{})
+		m2 = press(t, m2, "z")
+		if got, ok := layer.LoadSize(dir); !ok || got != layer.Drawer {
+			t.Fatalf("after failed resize: persisted (%v, %v), want unchanged (Drawer, true)", got, ok)
+		}
+
+		// Save failure still updates m.size and reports a footer hint.
+		blocker := filepath.Join(dir, "not-a-dir")
+		if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		m3 := build(t, "edited-crew-attention", w, h, Deps{Layer: rec, CacheDir: blocker}, Options{})
+		m3 = press(t, m3, "z")
+		if m3.size != layer.Board || !strings.Contains(m3.hint, "save size failed") || !m3.hintBad {
+			t.Fatalf("save failure: size=%v hint=%q bad=%v", m3.size, m3.hint, m3.hintBad)
+		}
+	})
 	t.Run("without Rex, actions say so and why", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{})
 		m = press(t, m, "z")

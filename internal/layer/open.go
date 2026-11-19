@@ -14,9 +14,12 @@ type Launch struct {
 	// Session is the Rex session to open the panel in.
 	Session string
 	// Board opens a new panel at Board size, and sets a restored one to
-	// it. Without it a new panel is a Drawer and a restored one keeps the
-	// size the human left it at.
+	// it. Without it a new panel uses Size (default Drawer) and a restored
+	// one keeps the size the human left it at.
 	Board bool
+	// Size is the starting size for a new panel when Board is false
+	// (default Drawer). A restored panel ignores Size.
+	Size Size
 	// Tab is the tab to show (an apc.Tabs name), or "" for the panel's
 	// default.
 	Tab string
@@ -106,7 +109,7 @@ func (l Launch) size() Size {
 	if l.Board {
 		return Board
 	}
-	return Drawer
+	return l.Size
 }
 
 // argv is the panel's command line. --focus names the pane the human was
@@ -119,7 +122,7 @@ func argv(l Launch, focused string) []string {
 	if l.Tab != "" {
 		args = append(args, "--tab", l.Tab)
 	}
-	if l.Board {
+	if l.size() == Board {
 		args = append(args, "--board")
 	}
 	return args

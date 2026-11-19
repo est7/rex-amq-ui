@@ -58,7 +58,7 @@ type Deps struct {
 	Exec func(ctx context.Context, env []string, name string, args ...string) error
 	// LookPath finds a program on PATH.
 	LookPath func(name string) (string, error)
-	// CacheDir is where opened hand-backs are written.
+	// CacheDir is where opened hand-backs and persisted panel state are written.
 	CacheDir string
 	// Editor is $EDITOR, the fallback viewer.
 	Editor string
@@ -181,9 +181,10 @@ type actionDone struct {
 	// leaves: the call minimized the panel on success.
 	leaves bool
 	// shown is Model.shown when the call started.
-	shown int
-	size  *layer.Size
-	err   error
+	shown   int
+	size    *layer.Size
+	saveErr error
+	err     error
 }
 
 // heldSize is a terminal resize that arrived while the panel was paused
@@ -380,10 +381,14 @@ func (m Model) act(what string, leaves bool, f func(context.Context, Controller)
 
 func (m Model) zoom() tea.Cmd {
 	to := m.size.Other()
+	cacheDir := m.deps.CacheDir
 	cmd := m.act("zoom", false, func(ctx context.Context, c Controller) error { return c.Resize(ctx, to) })
 	return func() tea.Msg {
 		d := cmd().(actionDone)
 		d.size = &to
+		if d.err == nil && cacheDir != "" {
+			d.saveErr = layer.SaveSize(cacheDir, to)
+		}
 		return d
 	}
 }
@@ -400,6 +405,9 @@ func (m Model) done(d actionDone) (tea.Model, tea.Cmd) {
 	m.hint, m.hintBad = "", false
 	if d.size != nil {
 		m.size = *d.size
+	}
+	if d.saveErr != nil {
+		m.hint, m.hintBad = "save size failed: "+d.saveErr.Error(), true
 	}
 	if d.leaves && d.shown == m.shown {
 		m.pause()

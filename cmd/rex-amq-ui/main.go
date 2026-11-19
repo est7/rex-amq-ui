@@ -46,8 +46,9 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	cacheDir, _ := os.UserCacheDir()
 	if len(args) > 0 && args[0] == "open" {
-		return runOpen(args[1:], os.Getenv, stdout, stderr)
+		return runOpen(args[1:], os.Getenv, cacheDir, stdout, stderr)
 	}
 	if len(args) > 0 && args[0] == "waiting" {
 		return runWaiting(args[1:], os.Getenv, stdout, stderr, waitingTimeout)
@@ -81,18 +82,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg := panelConfig{
 		Server: os.Getenv("REX_SERVER"), Session: cmp(*session, os.Getenv("REX_SESSION")), Block: os.Getenv("REX_BLOCK"),
-		AdapterBin: *adapterBin, Options: ui.Options{Tab: *tab, Focused: *focus},
+		AdapterBin: *adapterBin, CacheDir: cacheDir,
+		Options: ui.Options{Tab: *tab, Focused: *focus, Size: startPanelSize(*board, cacheDir)},
 		In: os.Stdin, Out: stdout,
 		Graphics: &ui.Graphics{Dir: kitty.DefaultDir, PID: os.Getpid()},
-	}
-	if *board {
-		cfg.Options.Size = layer.Board
 	}
 	if err := runPanel(context.Background(), cfg); err != nil {
 		fmt.Fprintln(stderr, "rex-amq-ui:", err)
 		return 1
 	}
 	return 0
+}
+
+func startPanelSize(board bool, cacheDir string) layer.Size {
+	if board {
+		return layer.Board
+	}
+	sz, _ := layer.LoadSize(cacheDir)
+	return sz
 }
 
 func cmp(a, b string) string {
@@ -106,6 +113,7 @@ func cmp(a, b string) string {
 type panelConfig struct {
 	Server, Session, Block string
 	AdapterBin             string
+	CacheDir               string
 	Options                ui.Options
 	In                     *os.File
 	Out                    io.Writer
@@ -144,10 +152,9 @@ func runPanel(parent context.Context, cfg panelConfig) error {
 		g.Out = out
 		gfx = &g
 	}
-	cache, _ := os.UserCacheDir()
 	model := ui.New(ui.Deps{
 		Layer: ctl, Clock: ui.SystemClock{}, Exec: execTool, LookPath: exec.LookPath,
-		CacheDir: cache, Editor: os.Getenv("EDITOR"), Graphics: gfx,
+		CacheDir: cfg.CacheDir, Editor: os.Getenv("EDITOR"), Graphics: gfx,
 	}, cfg.Options)
 
 	in := apc.NewReader(cfg.In)
@@ -263,12 +270,12 @@ func execTool(ctx context.Context, env []string, name string, args ...string) er
 }
 
 // runOpen is the launcher.
-func runOpen(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+func runOpen(args []string, getenv func(string) string, cacheDir string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("rex-amq-ui open", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	session := fs.String("session", "", "open the panel in Rex session `S` (default: $REX_SESSION)")
 	tab := fs.String("tab", "", "the tab to show: "+strings.Join(apc.Tabs, ", "))
-	board := fs.Bool("board", false, "open at Board size (centred, 88%) instead of Drawer (right, 35%)")
+	board := fs.Bool("board", false, "open at Board size (centred, 88%) instead of Drawer (right, 42%)")
 	adapterBin := fs.String("adapter-bin", "", "rex-amq-adapter binary `path` the panel runs")
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: rex-amq-ui open [flags]")
@@ -286,8 +293,10 @@ func runOpen(args []string, getenv func(string) string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "rex-amq-ui open: no tab %q (want one of %s)\n", *tab, strings.Join(apc.Tabs, ", "))
 		return 2
 	}
-	l := layer.Launch{Session: cmp(*session, getenv("REX_SESSION")), Tab: *tab}
-	l.Board = *board
+	l := layer.Launch{Session: cmp(*session, getenv("REX_SESSION")), Tab: *tab, Board: *board}
+	if !l.Board {
+		l.Size, _ = layer.LoadSize(cacheDir)
+	}
 	server := getenv("REX_SERVER")
 	if server == "" || l.Session == "" {
 		fmt.Fprintln(stderr, "rex-amq-ui open: needs $REX_SERVER and a session (--session or $REX_SESSION)")
