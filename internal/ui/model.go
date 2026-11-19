@@ -184,6 +184,7 @@ type mailState struct {
 	typing   bool
 	query    string
 	from     string // handle the list is filtered by
+	cycleID  string // message ID whose participants `p` is cycling through
 	follow   bool
 	expanded map[string]bool
 }

@@ -175,7 +175,7 @@ func (m Model) footer(c *canvas) {
 	case TabMembers:
 		keys = []string{"↵ focus", "1-9 pick", "r retired"}
 	case TabMail:
-		keys = []string{"/ search", "p by member", "f follow", "␣ excerpt"}
+		keys = []string{"/ search", "p filter", "f follow", "␣ excerpt", "o open"}
 	case TabGraph:
 		keys = []string{"[ ] replay", "L live", "h hide retired"}
 	}

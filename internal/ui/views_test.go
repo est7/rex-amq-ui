@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -243,19 +244,51 @@ func TestViewMapping(t *testing.T) {
 			t.Fatalf("m2 has no excerpt to open:\n%s", plain(m.Frame()))
 		}
 	})
-	t.Run("mail search and member filter", func(t *testing.T) {
+	t.Run("mail search and participant filter", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		// Search matches Subject, From, To, and authorized excerpt Body (case-insensitive).
 		m = press(t, m, "/", "S", "C", "O", "enter")
 		if f := m.Frame(); !contains(f, "question about scope") || contains(f, "build it") {
-			t.Fatalf("search:\n%s", plain(f))
+			t.Fatalf("search subject:\n%s", plain(f))
 		}
 		m = press(t, m, "esc") // clears the search
+		m = press(t, m, "/", "C", "O", "D", "E", "X", "enter")
+		if f := m.Frame(); !contains(f, "review s1") || contains(f, "build it") {
+			t.Fatalf("search To:\n%s", plain(f))
+		}
+		m = press(t, m, "esc")
+		m = press(t, m, "/", "T", "O", "K", "E", "N", "enter")
+		if f := m.Frame(); !contains(f, "build it") || contains(f, "review s1") {
+			t.Fatalf("search excerpt Body:\n%s", plain(f))
+		}
+		m = press(t, m, "esc")
+
+		// p cycles the currently selected message's participants: From -> primary To -> clear,
+		// regardless of TabMembers's cursor. Move TabMembers cursor to pi-04 (row 3) to prove independence.
 		m = step(t, m, apc.Command{Verb: apc.Tab, Tab: "members"})
-		m = press(t, m, "1")
+		m = press(t, m, "3")
 		m = step(t, m, apc.Command{Verb: apc.Tab, Tab: "mail"})
-		m = press(t, m, "p")
+		// Select m3 (claude-01 -> codex-03, "review s1") explicitly and press p.
+		m = press(t, m, "G", "p")
 		if f := m.Frame(); !contains(f, "from/to claude-01") || !contains(f, "review s1") || !contains(f, "build it") {
-			t.Fatalf("filter by claude-01:\n%s", plain(f))
+			t.Fatalf("1st p (From=claude-01):\n%s", plain(f))
+		}
+		if cur, ok := m.selectedMail(); !ok || cur.ID != "2026-11-16T09-04-00.000Z_m3" {
+			t.Fatalf("selection not anchored on m3 after 1st p: %+v", cur)
+		}
+		m = press(t, m, "p")
+		if f := m.Frame(); !contains(f, "from/to codex-03") || !contains(f, "review s1") || contains(f, "build it") {
+			t.Fatalf("2nd p (To=codex-03):\n%s", plain(f))
+		}
+		if cur, ok := m.selectedMail(); !ok || cur.ID != "2026-11-16T09-04-00.000Z_m3" {
+			t.Fatalf("selection not anchored on m3 after 2nd p: %+v", cur)
+		}
+		m = press(t, m, "p")
+		if f := m.Frame(); contains(f, "from/to ") || !contains(f, "build it") || !contains(f, "review s1") {
+			t.Fatalf("3rd p (clear):\n%s", plain(f))
+		}
+		if cur, ok := m.selectedMail(); !ok || cur.ID != "2026-11-16T09-04-00.000Z_m3" {
+			t.Fatalf("selection not anchored on m3 after 3rd p: %+v", cur)
 		}
 	})
 	t.Run("epics: first and default in a personal session", func(t *testing.T) {
@@ -1001,6 +1034,162 @@ func TestUncappedWrappingAndLineScrolling(t *testing.T) {
 		m = press(t, m, "g")
 		if m.sel[TabOverview] != 0 || m.scroll[TabOverview] != 0 || !contains(m.Frame(), "SYSTEM ALERTS") {
 			t.Fatalf("g reset: sel=%d scroll=%d\n%s", m.sel[TabOverview], m.scroll[TabOverview], plain(m.Frame()))
+		}
+	})
+}
+
+func TestMailOpenAndParticipantCycle(t *testing.T) {
+	w, h := refSize(t, layer.Drawer)
+	type ran struct {
+		env  []string
+		name string
+		args []string
+	}
+
+	t.Run("o on Mail writes read-only markdown with metadata and authorized excerpt, opens md-viewer, minimizes", func(t *testing.T) {
+		dir := t.TempDir()
+		rec := &recorder{}
+		var runs []ran
+		d := Deps{Layer: rec, CacheDir: dir,
+			LookPath: func(string) (string, error) { return "/opt/bin/md-viewer", nil },
+			Exec: func(_ context.Context, env []string, name string, args ...string) error {
+				runs = append(runs, ran{env, name, args})
+				return nil
+			}}
+		m := build(t, "edited-crew-attention", w, h, d, Options{Tab: "mail"})
+		// Select m1 which has an authorized excerpt (Kind=todo, Priority=normal, Body="Wire the token refresh.").
+		m = press(t, m, "g", "o")
+		path := filepath.Join(dir, "rex-amq-ui", "session_s-mail-2026-11-16T09-00-00.000Z_m1.md")
+		if len(runs) != 1 || runs[0].name != "/opt/bin/md-viewer" || !reflect.DeepEqual(runs[0].args, []string{"open", path}) ||
+			!reflect.DeepEqual(runs[0].env, []string{"REX_BLOCK=" + focusedPane}) {
+			t.Fatalf("runs %+v", runs)
+		}
+		b, err := os.ReadFile(path)
+		fi, _ := os.Stat(path)
+		if err != nil || fi.Mode().Perm() != 0o444 {
+			t.Fatalf("file err=%v mode=%v", err, fi.Mode())
+		}
+		got := string(b)
+		for _, want := range []string{
+			"# build it",
+			"- **From:** `claude-01`",
+			"- **To:** `claude-02`",
+			"- **ID:** `2026-11-16T09-00-00.000Z_m1`",
+			"- **Thread:** `p2p/claude-01__claude-02`",
+			"- **State:** `drained`",
+			"- **Created:** `2026-11-16T09:00:00Z`",
+			"- **Kind:** `todo`",
+			"- **Priority:** `normal`",
+			"Wire the token refresh.",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("mail markdown missing %q:\n%s", want, got)
+			}
+		}
+		if !reflect.DeepEqual(rec.got(), []string{"minimize"}) || !m.Paused() {
+			t.Fatalf("calls %v paused=%v", rec.got(), m.Paused())
+		}
+		// Reopening replaces the read-only file cleanly.
+		m = step(t, m, apc.Command{Verb: apc.Resume})
+		m = press(t, m, "o")
+		if len(runs) != 2 || m.hint != "" {
+			t.Fatalf("reopen mail: runs=%d hint=%q", len(runs), m.hint)
+		}
+	})
+
+	t.Run("o on Mail without authorized excerpt writes explicit notice and never reads AMQ files", func(t *testing.T) {
+		dir := t.TempDir()
+		rec := &recorder{}
+		var openedPath string
+		d := Deps{Layer: rec, CacheDir: dir,
+			LookPath: func(string) (string, error) { return "/opt/bin/md-viewer", nil },
+			Exec: func(_ context.Context, _ []string, _ string, args ...string) error {
+				openedPath = args[1]
+				return nil
+			}}
+		m := build(t, "edited-crew-attention", w, h, d, Options{Tab: "mail"})
+		// m3 (bounced, no authorized excerpt) is selected by default.
+		m = press(t, m, "o")
+		b, err := os.ReadFile(openedPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(b)
+		if !strings.Contains(got, "# review s1") || !strings.Contains(got, "bounced") ||
+			!strings.Contains(got, "No body excerpt was authorized in the session view.") {
+			t.Fatalf("unexpected unauthorized mail markdown:\n%s", got)
+		}
+	})
+
+	t.Run("o on Mail falls back to $EDITOR via OpenBeside, hints when empty or no viewer, and does not fire while typing search", func(t *testing.T) {
+		rec := &recorder{}
+		d := Deps{Layer: rec, CacheDir: t.TempDir(), Editor: "nvim -R",
+			LookPath: func(string) (string, error) { return "", errors.New("missing") }}
+		m := build(t, "edited-crew-attention", w, h, d, Options{Tab: "mail"})
+		// Typing 'o' inside / search adds to query instead of opening.
+		m = press(t, m, "/", "o", "enter")
+		if len(rec.got()) != 0 || m.mail.query != "o" {
+			t.Fatalf("typing o in search triggered open: calls=%v query=%q", rec.got(), m.mail.query)
+		}
+		m = press(t, m, "esc", "o")
+		got := rec.got()
+		if len(got) != 2 || !strings.HasPrefix(got[0], "beside "+focusedPane+" mail [nvim -R ") || got[1] != "minimize" {
+			t.Fatalf("editor fallback calls: %v", got)
+		}
+
+		// No messages selected -> hint.
+		empty := build(t, "recorded-bare", w, h, Deps{CacheDir: t.TempDir()}, Options{Tab: "mail"})
+		empty = press(t, empty, "o")
+		if !contains(empty.Frame(), "no message selected") {
+			t.Fatalf("empty mail open:\n%s", plain(empty.Frame()))
+		}
+	})
+
+	t.Run("p skips duplicate/empty To and resets cleanly on move or esc", func(t *testing.T) {
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		// Add a self-addressed message m5 and a multi-recipient message m6.
+		m5 := adapter.Message{ID: "2026-11-16T09-05-00.000Z_m5", From: "pi-04", To: []string{"pi-04"}, Subject: "self note", State: adapter.MsgDrained, CreatedAt: m.now().Add(-time.Minute)}
+		m6 := adapter.Message{ID: "2026-11-16T09-06-00.000Z_m6", From: "claude-01", To: []string{"claude-02", "pi-04"}, Subject: "multi", State: adapter.MsgQueued, CreatedAt: m.now()}
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.MessageUpsert{Header: next(m), Message: m5}})
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.MessageUpsert{Header: next(m), Message: m6}})
+
+		// Search matches secondary recipient pi-04 on m6.
+		m = press(t, m, "/", "p", "i", "-", "0", "4", "enter")
+		if !contains(m.Frame(), "multi") || !contains(m.Frame(), "self note") || contains(m.Frame(), "build it") {
+			t.Fatalf("search secondary To:\n%s", plain(m.Frame()))
+		}
+		m = press(t, m, "esc")
+
+		// Move to m5 (self-addressed pi-04 -> pi-04): p sets pi-04, second p clears immediately (skips duplicate To).
+		m = press(t, m, "G", "k")
+		if cur, _ := m.selectedMail(); cur.ID != m5.ID {
+			t.Fatalf("expected m5 selected, got %+v", cur)
+		}
+		m = press(t, m, "p")
+		if m.mail.from != "pi-04" {
+			t.Fatalf("1st p on self-addressed: from=%q", m.mail.from)
+		}
+		m = press(t, m, "p")
+		if m.mail.from != "" {
+			t.Fatalf("2nd p on self-addressed should clear, got from=%q", m.mail.from)
+		}
+
+		// Move selection during active filter resets cycle cleanly and never no-ops.
+		m = press(t, m, "g", "p") // on m1 (claude-01 -> claude-02), sets from=claude-01
+		if m.mail.from != "claude-01" {
+			t.Fatalf("m1 1st p: from=%q", m.mail.from)
+		}
+		m = press(t, m, "j") // move to m2 (claude-02 -> claude-01); cycle resets
+		if m.mail.cycleID != "" {
+			t.Fatalf("cycleID not cleared on move: %q", m.mail.cycleID)
+		}
+		m = press(t, m, "p") // starts m2's cycle at From=claude-02
+		if m.mail.from != "claude-02" {
+			t.Fatalf("m2 fresh cycle should filter by claude-02, got %q", m.mail.from)
+		}
+		m = press(t, m, "esc") // clears filter and resets cycle
+		if m.mail.from != "" || m.mail.cycleID != "" {
+			t.Fatalf("esc did not reset filter/cycle: from=%q cycle=%q", m.mail.from, m.mail.cycleID)
 		}
 	})
 }
