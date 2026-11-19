@@ -18,7 +18,7 @@ The panel has five tabs:
 | **Overview** | System alerts first (wrapped cleanly in Drawer): every member waiting on you, with a turn error, or stalled; bounced and dead-lettered mail; open obligations (`owed_by → owed_to`). Then the narrator's uncapped summary, the lifecycle, and the full latest hand-back card with its *Blocked on me* section highlighted (`j`/`k` scroll line-by-line inside tall cards). `o` opens the full hand-back. |
 | **Members** | The lead first, then *Active*, *Standing by*, and a folded *Retired* group (`r`). Each row has its number (`1`–`9`), `▶` on the pane you last focused, a status dot, `role(handle)`, model and effort (compacted with dynamic column widths in Drawer so tasks stay readable), its tab (Board only), its task, and unread mail. `Enter` focuses the member's pane and hides the panel. |
 | **Mail** | Every message in time order: `from → to`, age, state (`queued`, `drained`, `bounced`, `dead_lettered`), subject. `/` searches Subject, From, To, and authorized excerpt Body, `p` cycles the selected message's participants (`From` → primary `To` → clear), `f` follows new mail, `Space` expands the full authorized excerpt (line-scrollable when tall), and `o` opens the selected message in `md-viewer` (or `$EDITOR`). |
-| **Graph** | A picture of who mails whom, drawn as an image: members around an ellipse, mail as arrows between them. A replay bar above it (`[` `]` step through messages, `L` back to Live, `h` hides retired members) and a legend below. Click a member to select it; click it again to go to its pane. See [Graph](#graph). |
+| **Graph** | Who mails whom, in either a crisp zero-temp-file Unicode/TUI topology (showing every member with no `+N` collapsing, `j`/`k`/mouse/Enter to select and focus) or a Kitty graphics image around an ellipse. `t` switches modes; missing cell metrics or an unread-frame backlog fall back to TUI automatically. Includes a replay bar (`[` `]` step, `L` back to Live, `h` hides retired) and legend. See [Graph](#graph). |
 | **Epics** | Only in a session with a live personal agent, where it is the first tab: every linked Epic with its lifecycle, pending hand-back, alert count, and the narrator's latest line. `Enter` drills down into that Epic in-place inside the panel (`← <hub> › <epic>`) with its live Overview, Members, Mail, and Graph tabs; `s` switches Rex to that Epic's session, and `o` opens its hand-back. |
 
 ## Requirements
@@ -26,7 +26,7 @@ The panel has five tabs:
 - macOS and Rex with control API revision 13 (tested with Rex 0.1.0-preview.18).
 - `rex-amq-adapter` v0.24.0 or later, the first release with `stream panel` (its v:2 command set). An older adapter has no `stream` command: it exits 2 with its usage text. The panel then shows `◌ Reconnecting` with that exit status and the end of the usage text, and keeps retrying; `waiting` prints the same error on stderr and exits 1. The panel looks for the adapter in this order: `$REX_AMQ_ADAPTER_BIN`, then `/opt/homebrew/opt/rex-amq-adapter/bin/rex-amq-adapter`, then `PATH`. `--adapter-bin` (or the plugin's `adapter_bin` option) overrides all three. When the adapter refuses to stream (its guard turns away an agent's pane or session, or it does not know an argument), the panel shows `✕ Refused` with the adapter's error code, message, and suggested next command, and `waiting` prints them on stderr. The panel tries again only when the adapter marks the refusal retryable; otherwise fix the cause and reopen the panel (`Q`, then the toggle key).
 - Go 1.27 to build it.
-- For the Graph tab, a terminal that reads Kitty graphics from temporary files (`t=t`) and sends SGR pixel mouse reports (mode 1016) for clicks. Rex's terminal is meant to do both; the Graph tab has not yet been watched on Rex (see [docs/design.md](docs/design.md#graph-renderer)).
+- Optional for Kitty image mode on the Graph tab: a terminal that reads Kitty graphics from temporary files (`t=t`) and sends SGR pixel mouse reports (mode 1016). Without them — or if the terminal does not delete read `t=t` files — the Graph tab automatically uses its zero-temp-file Unicode/TUI topology (see [docs/design.md](docs/design.md#graph-renderer)).
 - Optional: `md-viewer` to read a full hand-back or mail message (`o`). Without it the panel opens a read-only copy in `$EDITOR`.
 
 ## How to install
@@ -86,16 +86,18 @@ The plugin finds `rex-amq-ui` through your login shell (`$SHELL -l -c 'command -
 |---|---|---|
 | Rex (plugin) | `Cmd+Shift+A` | `amqui_toggle`: show the panel in the current tab, or hide it when it is visible there (see below) |
 | Rex (plugin) | `Cmd+Shift+U` | `amqui_waiting`: with one member waiting on you, focus its pane; with several, show the panel on Overview |
-| Panel | `Tab` / `Shift+Tab` | Next / previous tab |
+| Panel | `Tab` / `Shift+Tab`, `H` / `L`, `[` / `]` | Next / previous tab (`[` `]` step replay on Graph; `L` returns to Live on Graph while replaying) |
+| Panel | `Alt+1`–`Alt+5`, `F1`–`F5`, click tab | Jump directly to a tab |
+| Panel | Mouse wheel, click, double-click | Scroll lists (or step replay in Kitty Graph); click selects a row; double-click triggers `Enter` |
 | Panel | `z` | Drawer ↔ Board |
 | Panel | `j` `k`, `↑` `↓`, `g` `G` | Move (line-by-line within tall expanded mail or Overview cards); first / last |
 | Panel | `1`–`9` | Select that row in Members or Epics |
-| Panel | `Enter` | Focus the member's pane (switching to the Epic's session when drilled down) or drill down into the selected Epic in-place on Epics |
+| Panel | `Enter` | Focus the selected member's pane (Members, Overview alert, or TUI Graph; switches to the Epic's session when drilled down), open the Hand-back row on Overview, drill down into the selected Epic in-place on Epics, or toggle a Mail excerpt |
 | Epics / Drilled Epic | `s` | Switch Rex to the selected (or drilled-down) Epic's session and hide the panel |
 | Overview / Epics / Mail | `o` | Open the full hand-back (Overview/Epics) or selected message metadata and authorized excerpt (Mail) with `md-viewer` (or `$EDITOR`) |
 | Mail | `/`, `p`, `f`, `Space`, `o` | Search Subject/From/To/Body, cycle selected message participants, follow, expand excerpt, open in viewer |
-| Graph | `[` `]`, `L`, `h` | Previous / next message, back to Live, hide retired |
-| Graph | click a member | Select it (Members follows); a second click focuses its pane and hides the panel |
+| Graph | `[` `]`, `L`, `h`, `t` | Previous / next message, back to Live, hide retired, toggle TUI ↔ Kitty mode |
+| Graph | click / double-click a member | Select it (Members follows); a second click (or `Enter` in TUI mode) focuses its pane and hides the panel |
 | Panel | `Esc` / `q` | Step back (clear a filter, close an excerpt, leave a drilled-down Epic); at the top, hide the panel |
 | Drilled Epic | `Backspace` | Step back or return to the Hub Epics list (does not hide at the root) |
 | Panel | `Q` | Quit the panel; Rex closes its layer, and the next toggle opens a new one |
@@ -145,14 +147,15 @@ While paused, the panel keeps folding the adapter's frames but writes nothing. I
 
 ## Graph
 
-The Graph tab draws its picture as an image, through the Kitty graphics protocol, between the replay bar and the legend.
+The Graph tab renders who mails whom between the replay bar (which shows the active `TUI` or `Kitty` mode badge) and the legend, in either Unicode/TUI mode or Kitty graphics image mode (`t` toggles between them).
 
-- **What it shows.** Members sit around an ellipse, the lead at the top and the rest clockwise. Up to 6 live members get a node each, and the others fold into one `+N` node. While retired members are shown (`h` toggles them), up to 2 of them appear dimmed. Each pair of members that mailed has one arrow per direction, thicker the more mail it carries. A solid green arrow is drained mail, a dashed blue one is queued mail, and a dashed red one is bounced or dead-lettered mail. A yellow arrow with a glow is an open obligation. A working member's node breathes, and new mail sends a pulse along its arrow for 1.2 seconds. Text is Go Mono, compiled into the binary, so a frame looks the same on every machine.
-- **Replay.** `[` and `]` move the cursor one message back or forward, and the picture shows the mail up to it, pulsing the message the cursor reaches. `L` (or `Esc`) goes back to Live, and the mail the replay hid pulses once.
-- **Clicks.** A left click on a node selects that member, here and in Members. A second click on the selected node does what `Enter` does on Members: it focuses that member's pane and hides the panel.
-- **Cost.** A frame is drawn only when something changed or something moves on its own (a working member, a pulse), at up to 30 frames a second. An idle graph draws nothing. The panel draws no image while it is paused or on another tab, and removes the one it showed. Each frame goes to the terminal as a file in `/tmp`, which the Kitty protocol has the terminal delete once read (not yet observed on Rex). When the terminal has not read the last 3 frames, the panel skips frames and says so in the footer. On exit the panel removes the image, turns pixel mouse reports off, and deletes any of its frame files left in `/tmp`.
+- **TUI mode (zero temp files).** Renders every live member — and every retired member unless hidden with `h` — with no 6-member cap and no `+N` collapsing. Each member shows its status dot, `role(handle)`, activity, traffic counts (`↑out ↓in`), and directed Unicode arrows (`──▶` green drained, `━━▶` bold yellow open obligation, `┄┄▶` blue queued or red bounced/dead-lettered, with `◆` marking the active replay or latest message edge). Use `j`/`k`, mouse wheel, click, double-click, or `Enter` to scroll, select, and focus a member's pane. The tab uses TUI mode automatically whenever cell pixel metrics are unavailable or Kitty delivery hits an unread-frame backlog.
+- **Kitty image mode.** Places members around an ellipse, the lead at the top and the rest clockwise (up to 6 live members plus a `+N` node, and up to 2 dimmed retired members while shown). Arrows grow thicker with message count, working members breathe, and new mail pulses along its arrow for 1.2 seconds. Text is Go Mono, compiled into the binary.
+- **Replay.** `[` and `]` (or mouse wheel in Kitty mode) move the cursor one message back or forward, showing the mail up to that point. `L` (or `Esc`) returns to Live; when already Live, `L` moves to the next tab.
+- **Clicks.** In TUI mode, clicking a member selects it (syncing Members) and double-clicking or pressing `Enter` focuses its pane. In Kitty mode, clicking a node selects it and a second click focuses its pane; clicking outside the graph region (such as the tab bar) still switches tabs directly.
+- **Cost & resilience.** In TUI mode the Graph tab writes zero `/tmp` files. In Kitty image mode, a frame is drawn only when something changed or moves on its own, capped at `<= 15` frames per second (an idle graph draws nothing). Each Kitty frame goes to `/tmp` as a `t=t` file; leaving the tab, pausing, minimizing, switching to TUI, or exiting deletes the image, turns pixel mouse off, and proactively removes this process's stale frame files. If the terminal leaves 3 frames unread (`ErrBacklog`), the panel immediately clears the frozen Kitty image, deletes its stale frame files, stops the animation loop, and switches smoothly to live TUI mode (`t` retries Kitty).
 
-[docs/design.md](docs/design.md#graph-renderer) covers how frames are drawn and sent, and which Rex behaviour it relies on that no test has seen yet.
+[docs/design.md](docs/design.md#graph-renderer) covers how frames are drawn and sent, and which Rex behaviour Kitty image mode relies on that no test has seen yet.
 
 ## How to test
 
