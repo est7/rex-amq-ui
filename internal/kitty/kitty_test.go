@@ -187,6 +187,32 @@ func TestKittyGraphBacklogBounded(t *testing.T) {
 	}
 }
 
+func TestKittyGraphClearCleansOwnFilesOnly(t *testing.T) {
+	dir := t.TempDir()
+	tr := kitty.NewTransport(dir, pid)
+	for range kitty.MaxUnread {
+		show(t, tr, frame(2, 2, 0), kitty.Cell{})
+	}
+	other := fmt.Sprintf("tty-graphics-protocol-rex-amq-ui-%d-1.rgba", pid+1)
+	if err := os.WriteFile(filepath.Join(dir, other), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if err := tr.Clear(&b); err != nil || b.String() != "\x1b_Ga=d,d=A,q=2\x1b\\" {
+		t.Fatalf("Clear wrote %q, %v", b.String(), err)
+	}
+	if tr.Shown() || !tr.Room() {
+		t.Errorf("after Clear: Shown=%v Room=%v, want false true", tr.Shown(), tr.Room())
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 1 || ents[0].Name() != other {
+		t.Errorf("after Clear dir has %v, want only %q", ents, other)
+	}
+}
+
 func TestKittyGraphCleanupOwnFilesOnly(t *testing.T) {
 	dir := t.TempDir()
 	tr := kitty.NewTransport(dir, pid)
@@ -266,7 +292,7 @@ func TestSchedulerIdleNeverTicks(t *testing.T) {
 }
 
 func TestSchedulerPacesFrames(t *testing.T) {
-	s := kitty.NewScheduler(30)
+	s := kitty.NewScheduler(kitty.MaxFPS)
 	a := &anim{on: true}
 	tick, d, ok := s.Kick(a, start)
 	if !ok || d != 0 {
@@ -281,17 +307,23 @@ func TestSchedulerPacesFrames(t *testing.T) {
 		tick = nt
 		now = now.Add(next)
 	}
-	if fps := float64(time.Second) / float64(s.Interval()); fps < 24 || fps > 30.01 {
-		t.Errorf("%.1f fps, want 24-30", fps)
+	if fps := float64(time.Second) / float64(s.Interval()); fps < 1 || fps > float64(kitty.MaxFPS)+0.01 {
+		t.Errorf("%.1f fps, want 1-%d", fps, kitty.MaxFPS)
 	}
 }
 
 func TestSchedulerFPSClamped(t *testing.T) {
-	if got := kitty.NewScheduler(120).Interval(); got != time.Second/30 {
-		t.Errorf("120 fps interval %v, want 1/30 s", got)
+	if got := kitty.NewScheduler(120).Interval(); got != time.Second/kitty.MaxFPS {
+		t.Errorf("120 fps interval %v, want 1/%d s", got, kitty.MaxFPS)
 	}
-	if got := kitty.NewScheduler(5).Interval(); got != time.Second/24 {
-		t.Errorf("5 fps interval %v, want 1/24 s", got)
+	if got := kitty.NewScheduler(30).Interval(); got != time.Second/kitty.MaxFPS {
+		t.Errorf("30 fps interval %v, want 1/%d s", got, kitty.MaxFPS)
+	}
+	if got := kitty.NewScheduler(5).Interval(); got != time.Second/5 {
+		t.Errorf("5 fps interval %v, want 1/5 s", got)
+	}
+	if got := kitty.NewScheduler(0).Interval(); got != time.Second {
+		t.Errorf("0 fps interval %v, want 1 s", got)
 	}
 }
 

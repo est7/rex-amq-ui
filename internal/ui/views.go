@@ -32,24 +32,45 @@ func rowBounds(es []entry, sel int) (first, last int) {
 	return first, last
 }
 
-// list draws entries into c, scrolled to show the selected row: centred
-// when it fits in the viewport, or scrolled line-by-line by off when the
-// selected row is taller than the viewport.
-func list(c *canvas, es []entry, sel, off int) {
+// listStart is the first visible entry index for a viewport of height lines,
+// shared between list rendering and mouse row hit-testing.
+func listStart(es []entry, sel, off, height int) int {
 	first, last := rowBounds(es, sel)
-	n, start := c.left(), 0
-	if first >= 0 && n > 0 && len(es) > n {
-		if rowH := last - first + 1; rowH > n {
-			off = min(max(off, 0), rowH-n)
+	start := 0
+	if first >= 0 && height > 0 && len(es) > height {
+		if rowH := last - first + 1; rowH > height {
+			off = min(max(off, 0), rowH-height)
 			start = first + off
 		} else {
-			start = max(first-n/2, 0)
-			if last >= start+n {
-				start = last - n + 1
+			start = max(first-height/2, 0)
+			if last >= start+height {
+				start = last - height + 1
 			}
-			start = min(start, first, len(es)-n)
+			start = min(start, first, len(es)-height)
 		}
 	}
+	return start
+}
+
+// viewStart is the first visible entry index for tab t at viewport height,
+// shared between list rendering and mouse click hit-testing. When a mouse
+// click pinned the viewport, it keeps that start as long as the selected row
+// still overlaps the visible window so a physical double-click at the same
+// screen coordinates hits the same row.
+func (m Model) viewStart(t Tab, es []entry, height int) int {
+	if pin, ok := m.pin[t]; ok && height > 0 && len(es) > height {
+		pin = min(max(pin, 0), len(es)-height)
+		first, last := rowBounds(es, m.sel[t])
+		if first >= 0 && last >= pin && first < pin+height {
+			return pin
+		}
+	}
+	return listStart(es, m.sel[t], m.scroll[t], height)
+}
+
+// drawList draws entries into c starting at m.viewStart(t, es, c.left()).
+func (m Model) drawList(c *canvas, t Tab, es []entry) {
+	start := m.viewStart(t, es, c.left())
 	for _, e := range es[start:] {
 		if c.full() {
 			return
@@ -68,6 +89,10 @@ func (m Model) listEntries(t Tab) ([]entry, int) {
 		return m.mailEntries(), max(m.contentHeight()-1, 0)
 	case TabEpics:
 		return m.epicsEntries(), m.contentHeight()
+	case TabGraph:
+		if m.graphUsesTUI() {
+			return m.graphTUIEntries(), m.GraphRegion().H
+		}
 	}
 	return nil, 0
 }
@@ -100,7 +125,7 @@ func capsule(text string, fg, bg color.Color) Span {
 // overview lists the alerts, one row each, then the narrator, the
 // lifecycle, and the hand-back, a row per section, so j/k and G scroll
 // through all of it.
-func (m Model) overview(c *canvas) { list(c, m.overviewEntries(), m.sel[TabOverview], m.scroll[TabOverview]) }
+func (m Model) overview(c *canvas) { m.drawList(c, TabOverview, m.overviewEntries()) }
 
 // overviewSections are the rows below the alerts: narrator, then the
 // lifecycle and hand-back when the view has them.
@@ -115,6 +140,18 @@ func (m Model) overviewSections() int {
 		}
 	}
 	return n
+}
+
+func (m Model) overviewHandBackRow() (int, bool) {
+	v := m.view()
+	if v == nil || v.HandBack == nil {
+		return 0, false
+	}
+	row := len(m.alerts()) + 1
+	if v.Lifecycle != nil {
+		row++
+	}
+	return row, true
 }
 
 func (m Model) view() *adapter.SessionView {
@@ -296,7 +333,7 @@ func (m Model) membersView(c *canvas) {
 		c.add(Span{Text: " No agents in this session.", Fg: p.Faint, Italic: true})
 		return
 	}
-	list(c, m.memberEntries(), m.sel[TabMembers], m.scroll[TabMembers])
+	m.drawList(c, TabMembers, m.memberEntries())
 }
 
 func memberDisplayName(a adapter.Agent) string {
@@ -588,7 +625,7 @@ func (m Model) mailView(c *canvas) {
 		c.add(Span{Text: " No messages.", Fg: p.Faint, Italic: true})
 		return
 	}
-	list(c, es, m.sel[TabMail], m.scroll[TabMail])
+	m.drawList(c, TabMail, es)
 }
 
 func (m Model) mailCapsule(msg adapter.Message) Span {
@@ -635,11 +672,20 @@ func (m Model) graphView(c *canvas) {
 	if len(msgs) > 1 {
 		span = " · " + compact(msgs[len(msgs)-1].CreatedAt.Sub(msgs[0].CreatedAt))
 	}
+	modeCap := capsule("Kitty", p.Green, p.GreenBg)
+	if m.graphUsesTUI() {
+		modeCap = capsule("TUI", p.Aqua, p.Overlay)
+	}
 	c.addLR(p.Surface,
-		[]Span{{Text: " |<  <  >  ", Fg: p.Fg, Bold: true}, live, {Text: "  Hide retired " + hide, Fg: p.Muted}},
+		[]Span{{Text: " |<  <  >  ", Fg: p.Fg, Bold: true}, live, {Text: "  Hide retired " + hide + "  ", Fg: p.Muted}, modeCap},
 		[]Span{{Text: fmt.Sprintf("%d / %d messages%s ", at+1, len(msgs), span), Fg: p.Muted}})
-	for range m.GraphRegion().H {
-		c.blank()
+	regH := m.GraphRegion().H
+	if m.graphUsesTUI() {
+		m.renderGraphTUI(c, regH)
+	} else {
+		for range regH {
+			c.blank()
+		}
 	}
 	c.add(Span{Text: " ──", Fg: p.Green}, Span{Text: " drained  ", Fg: p.Muted},
 		Span{Text: "━━", Fg: p.Yellow, Bold: true}, Span{Text: " obligation  ", Fg: p.Muted},
@@ -709,5 +755,5 @@ func (m Model) epicsView(c *canvas) {
 		c.add(Span{Text: " No Epics are linked to this personal agent yet.", Fg: p.Faint, Italic: true})
 		return
 	}
-	list(c, m.epicsEntries(), m.sel[TabEpics], m.scroll[TabEpics])
+	m.drawList(c, TabEpics, m.epicsEntries())
 }

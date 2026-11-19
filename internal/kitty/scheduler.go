@@ -10,7 +10,10 @@ type Animator interface{ NeedsAnimation() bool }
 // loop that was stopped or replaced, is stale and draws nothing.
 type Tick struct{ gen uint64 }
 
-// Scheduler decides when the next animation frame is due, at 24-30 fps,
+// MaxFPS caps Kitty animation frame rate to bound /tmp frame churn.
+const MaxFPS = 15
+
+// Scheduler decides when the next animation frame is due, at up to MaxFPS,
 // and only while the Animator needs one: an idle graph costs no frames.
 // It never sleeps or starts goroutines; the caller arms a timer for the
 // delay it returns (a tea.Tick in the UI) and calls Fire when it goes off.
@@ -22,9 +25,9 @@ type Scheduler struct {
 	last     time.Time
 }
 
-// NewScheduler paces frames at fps, held to 24..30.
+// NewScheduler paces frames at fps, held to 1..MaxFPS.
 func NewScheduler(fps int) *Scheduler {
-	return &Scheduler{interval: time.Second / time.Duration(min(max(fps, 24), 30))}
+	return &Scheduler{interval: time.Second / time.Duration(min(max(fps, 1), MaxFPS))}
 }
 
 // Interval is the time between frames.

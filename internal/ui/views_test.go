@@ -342,14 +342,15 @@ func TestViewMapping(t *testing.T) {
 		if r != (Rect{X: 1, Y: 4, W: w - 2, H: h - 8}) {
 			t.Fatalf("region %+v", r)
 		}
-		ls := lines(m.Frame())
-		for y := r.Y; y < r.Y+r.H; y++ {
-			if ls[y] != "│"+strings.Repeat(" ", w-2)+"│" {
-				t.Fatalf("region row %d not framed blank: %q", y, ls[y])
-			}
+		if bad := holes(m.Frame(), w, h); bad != nil {
+			t.Fatalf("TUI graph holes: %v", bad)
 		}
-		if !strings.Contains(ls[3], "3 / 3 messages · 4m00s") || !strings.Contains(ls[r.Y+r.H], "drained") {
+		ls := lines(m.Frame())
+		if !strings.Contains(ls[3], "TUI") || !strings.Contains(ls[3], "3 / 3 messages · 4m00s") || !strings.Contains(ls[r.Y+r.H], "drained") {
 			t.Fatalf("bar %q legend %q", ls[3], ls[r.Y+r.H])
+		}
+		if f := plain(m.Frame()); !strings.Contains(f, "orchestrator(claude-01)") || !strings.Contains(f, "━━▶") {
+			t.Fatalf("without Graphics, Graph should render TUI topology:\n%s", f)
 		}
 		m = press(t, m, "[")
 		if !strings.Contains(lines(m.Frame())[3], "2 / 3") || !contains(m.Frame(), "question about scope") {

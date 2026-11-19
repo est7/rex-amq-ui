@@ -125,7 +125,7 @@ func (s *screen) Write(p []byte) (int, error) {
 }
 
 func newGraphTab(g Graphics, clock Clock) *graphTab {
-	return &graphTab{out: &screen{w: g.Out}, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(30)}
+	return &graphTab{out: &screen{w: g.Out}, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(kitty.MaxFPS)}
 }
 
 // reset replaces the graph model for a newly subscribed session so nodes,
@@ -190,7 +190,9 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 	case tea.ForegroundColorMsg, tea.BackgroundColorMsg:
 		gt.dirty = true
 	case tea.MouseClickMsg:
-		cmds = append(cmds, m.click(msg))
+		if m.tab == TabGraph && !m.graphUsesTUI() {
+			cmds = append(cmds, m.click(msg))
+		}
 	case graphSettle:
 		if msg.showing == gt.showing && gt.phase == settling {
 			gt.phase = drawing
@@ -223,7 +225,7 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, m.measure())
 	}
 
-	showing := visible && gt.cell.Valid()
+	showing := visible && !m.graphTUI && gt.cell.Valid() && !gt.stalled
 	switch {
 	case !showing && (gt.phase != hidden || gt.tr.Shown() || gt.mouse):
 		m.hideImage()
@@ -298,18 +300,15 @@ func (m *Model) frame(t kitty.Tick) tea.Cmd {
 	_, nt, next, again := gt.sched.Fire(t, gt, m.deps.Clock.Now())
 	if err := m.draw(); err != nil {
 		if errors.Is(err, kitty.ErrBacklog) {
-			// Keep trying at the frame rate until the terminal reads.
-			gt.dirty = true
-			if !gt.stalled {
-				gt.stalled = true
-				m.hint, m.hintBad = "graph: the terminal has not read the last frames", true
-			}
-			if !again {
-				return m.kick()
-			}
-		} else {
-			m.hint, m.hintBad = "graph: "+err.Error(), true
+			// Terminal did not read the last Kitty frames: fall back
+			// immediately to zero-temp-file TUI topology, clear the frozen
+			// Kitty image and stale frame files, and stop the tick loop.
+			gt.stalled = true
+			m.hint, m.hintBad = "graph: terminal did not read Kitty frames — switched to TUI (t to retry)", true
+			m.hideImage()
+			return nil
 		}
+		m.hint, m.hintBad = "graph: "+err.Error(), true
 	} else if gt.stalled {
 		gt.stalled = false
 		m.hint, m.hintBad = "", false

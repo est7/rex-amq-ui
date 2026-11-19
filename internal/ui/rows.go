@@ -337,6 +337,7 @@ func (m *Model) toggleExcerpt() {
 		m.mail.expanded[id] = true
 	}
 	m.scroll[TabMail] = 0
+	m.clearPin(TabMail)
 }
 
 // graphMessages are the messages the Graph replays, oldest first; with
@@ -396,7 +397,7 @@ func (m Model) rowCount(t Tab) int {
 	case TabMail:
 		return len(m.mailRows())
 	case TabGraph:
-		return len(m.graphMessages())
+		return len(m.graphTUINodes())
 	}
 	return 0
 }

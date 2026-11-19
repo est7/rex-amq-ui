@@ -22,6 +22,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		ask = m.askColours()
 	}
 	m.hint, m.hintBad = "", false
+	m.lastClick = clickState{}
 	if ask != nil {
 		next, cmd := m.key(k)
 		return next, tea.Batch(ask, cmd)
@@ -38,6 +39,41 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.cycle(-1)
 		return m, nil
+	case "H":
+		m.cycle(-1)
+		return m, nil
+	case "L":
+		if m.tab == TabGraph && m.graphAt != "" {
+			m.graphAt = ""
+			return m, nil
+		}
+		m.cycle(1)
+		return m, nil
+	case "[":
+		if m.tab != TabGraph {
+			m.cycle(-1)
+			return m, nil
+		}
+	case "]":
+		if m.tab != TabGraph {
+			m.cycle(1)
+			return m, nil
+		}
+	case "alt+1", "f1":
+		m.selectTabIndex(0)
+		return m, nil
+	case "alt+2", "f2":
+		m.selectTabIndex(1)
+		return m, nil
+	case "alt+3", "f3":
+		m.selectTabIndex(2)
+		return m, nil
+	case "alt+4", "f4":
+		m.selectTabIndex(3)
+		return m, nil
+	case "alt+5", "f5":
+		m.selectTabIndex(4)
+		return m, nil
 	case "z":
 		return m, m.zoom()
 	case "j", "down":
@@ -52,6 +88,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.sel[m.tab] = 0
 		m.scroll[m.tab] = 0
+		m.clearPin(m.tab)
 		m.unfollow()
 		return m, nil
 	case "G", "end":
@@ -61,6 +98,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.sel[m.tab] = last
 		m.scroll[m.tab] = m.maxScroll(m.tab, last)
+		m.clearPin(m.tab)
 		return m, nil
 	case "esc", "q":
 		if m.stepBack() {
@@ -95,6 +133,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if i := int(s[0] - '1'); i < m.rowCount(m.tab) {
 			m.sel[m.tab] = i
 			m.scroll[m.tab] = 0
+			m.clearPin(m.tab)
 		}
 		return m, nil
 	}
@@ -111,6 +150,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s == "r" {
 			m.retired = !m.retired
 			m.sel[TabMembers] = clampSel(m.sel[TabMembers], m.rowCount(TabMembers))
+			m.clearPin(TabMembers)
 		}
 	case TabMail:
 		return m.mailKey(s)
@@ -131,11 +171,19 @@ func (m *Model) cycle(d int) {
 	m.tab, m.tabSet = tabs[(i+d+len(tabs))%len(tabs)], true
 }
 
+func (m *Model) selectTabIndex(idx int) {
+	tabs := m.tabs()
+	if idx >= 0 && idx < len(tabs) {
+		m.tab, m.tabSet = tabs[idx], true
+	}
+}
+
 func (m *Model) move(d int) {
 	if d == 0 {
 		return
 	}
 	t := m.tab
+	m.clearPin(t)
 	n := m.rowCount(t)
 	if n == 0 {
 		m.sel[t] = 0
@@ -208,12 +256,14 @@ func (m *Model) stepBack() bool {
 			m.sel[TabMail] = clampSel(m.sel[TabMail], m.rowCount(TabMail))
 			m.scroll[TabMail] = 0
 		}
+		m.clearPin(TabMail)
 		return true
 	case TabMembers:
 		if m.retired {
 			m.retired = false
 			m.sel[TabMembers] = clampSel(m.sel[TabMembers], m.rowCount(TabMembers))
 			m.scroll[TabMembers] = 0
+			m.clearPin(TabMembers)
 			return true
 		}
 	case TabGraph:
@@ -225,18 +275,32 @@ func (m *Model) stepBack() bool {
 	return false
 }
 
-// enter acts on the selected row: jump to a member's pane, drill into an
-// Epic in-place, or open a message's excerpt.
+// enter acts on the selected row: jump to a member's pane, open the
+// hand-back on Overview, drill into an Epic in-place, or toggle a
+// message's excerpt.
 func (m Model) enter() (tea.Model, tea.Cmd) {
 	switch m.tab {
-	case TabMembers, TabOverview:
+	case TabMembers:
 		if handle := m.selectedHandle(); handle != "" {
 			return m, m.focus(handle)
+		}
+	case TabOverview:
+		if handle := m.selectedHandle(); handle != "" {
+			return m, m.focus(handle)
+		}
+		if hbRow, ok := m.overviewHandBackRow(); ok && m.sel[TabOverview] == hbRow {
+			return m, m.openHandBack()
 		}
 	case TabEpics:
 		return m.drillDown()
 	case TabMail:
 		m.toggleExcerpt()
+	case TabGraph:
+		if m.graphUsesTUI() {
+			if handle := m.selectedGraphHandle(); handle != "" {
+				return m, m.focus(handle)
+			}
+		}
 	}
 	return m, nil
 }
@@ -278,9 +342,11 @@ func (m Model) mailKey(s string) (Model, tea.Cmd) {
 		m.mail.typing = true
 	case "p":
 		m.cycleMailParticipant()
+		m.clearPin(TabMail)
 		return m, nil
 	case "f":
 		m.mail.follow = !m.mail.follow
+		m.clearPin(TabMail)
 		if m.mail.follow {
 			last := max(m.rowCount(TabMail)-1, 0)
 			if m.sel[TabMail] != last {
@@ -316,6 +382,7 @@ func (m Model) searchKey(k tea.KeyPressMsg) Model {
 	m.mail.cycleID = ""
 	m.sel[TabMail] = clampSel(m.sel[TabMail], m.rowCount(TabMail))
 	m.scroll[TabMail] = 0
+	m.clearPin(TabMail)
 	return m
 }
 
@@ -344,6 +411,24 @@ func (m *Model) graphKey(s string) {
 		m.hideRetired = !m.hideRetired
 		if _, ok := m.replayIndex(); !ok {
 			m.graphAt = ""
+		}
+		m.sel[TabGraph] = clampSel(m.sel[TabGraph], m.rowCount(TabGraph))
+		m.scroll[TabGraph] = 0
+		m.clearPin(TabGraph)
+	case "t":
+		if m.graphUsesTUI() {
+			m.graphTUI = false
+			if m.gfx != nil {
+				m.gfx.stalled = false
+				m.gfx.dirty = true
+				if !m.gfx.cell.Valid() {
+					m.hint = "graph: Kitty image unavailable (no cell metrics); using TUI"
+				}
+			} else {
+				m.hint = "graph: Kitty image unavailable; using TUI"
+			}
+		} else {
+			m.graphTUI = true
 		}
 	}
 }
