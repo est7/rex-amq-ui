@@ -190,7 +190,9 @@ func (m *Model) graphics(msg tea.Msg) tea.Cmd {
 	case tea.ForegroundColorMsg, tea.BackgroundColorMsg:
 		gt.dirty = true
 	case tea.MouseClickMsg:
-		cmds = append(cmds, m.click(msg))
+		if m.tab == TabGraph {
+			cmds = append(cmds, m.click(msg))
+		}
 	case graphSettle:
 		if msg.showing == gt.showing && gt.phase == settling {
 			gt.phase = drawing

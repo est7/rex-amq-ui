@@ -32,24 +32,31 @@ func rowBounds(es []entry, sel int) (first, last int) {
 	return first, last
 }
 
+// listStart is the first visible entry index for a viewport of height lines,
+// shared between list rendering and mouse row hit-testing.
+func listStart(es []entry, sel, off, height int) int {
+	first, last := rowBounds(es, sel)
+	start := 0
+	if first >= 0 && height > 0 && len(es) > height {
+		if rowH := last - first + 1; rowH > height {
+			off = min(max(off, 0), rowH-height)
+			start = first + off
+		} else {
+			start = max(first-height/2, 0)
+			if last >= start+height {
+				start = last - height + 1
+			}
+			start = min(start, first, len(es)-height)
+		}
+	}
+	return start
+}
+
 // list draws entries into c, scrolled to show the selected row: centred
 // when it fits in the viewport, or scrolled line-by-line by off when the
 // selected row is taller than the viewport.
 func list(c *canvas, es []entry, sel, off int) {
-	first, last := rowBounds(es, sel)
-	n, start := c.left(), 0
-	if first >= 0 && n > 0 && len(es) > n {
-		if rowH := last - first + 1; rowH > n {
-			off = min(max(off, 0), rowH-n)
-			start = first + off
-		} else {
-			start = max(first-n/2, 0)
-			if last >= start+n {
-				start = last - n + 1
-			}
-			start = min(start, first, len(es)-n)
-		}
-	}
+	start := listStart(es, sel, off, c.left())
 	for _, e := range es[start:] {
 		if c.full() {
 			return
@@ -115,6 +122,18 @@ func (m Model) overviewSections() int {
 		}
 	}
 	return n
+}
+
+func (m Model) overviewHandBackRow() (int, bool) {
+	v := m.view()
+	if v == nil || v.HandBack == nil {
+		return 0, false
+	}
+	row := len(m.alerts()) + 1
+	if v.Lifecycle != nil {
+		row++
+	}
+	return row, true
 }
 
 func (m Model) view() *adapter.SessionView {

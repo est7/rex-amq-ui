@@ -115,20 +115,57 @@ func (m Model) header(c *canvas) {
 	c.addLR(p.Bg, left, right)
 }
 
-func (m Model) tabBar(c *canvas) {
+type tabPill struct {
+	tab        Tab
+	start, end int // half-open frame X cell coordinates [start, end)
+	spans      []Span
+}
+
+// tabPills builds the tab bar pills and their exact frame X coordinates so
+// rendering and mouse click hit-testing stay in lockstep.
+func (m Model) tabPills() []tabPill {
 	p := m.pal
-	spans := []Span{{Text: " "}}
-	for _, t := range m.tabs() {
+	tabs := m.tabs()
+	out := make([]tabPill, 0, len(tabs))
+	col := 1 // leading space inside left border
+	maxX := m.w - borderWidth
+	for _, t := range tabs {
 		label := m.tabLabel(t)
 		bg, fg := p.Surface, p.Muted
 		if t == m.tab {
 			bg, fg = p.Overlay, p.Fg
 		}
-		spans = append(spans, Span{Text: " " + label.name, Fg: fg, Bg: bg, Bold: t == m.tab})
+		ps := []Span{{Text: " " + label.name, Fg: fg, Bg: bg, Bold: t == m.tab}}
 		if label.count != "" {
-			spans = append(spans, Span{Text: " " + label.count, Fg: label.countFg, Bg: bg, Bold: t == m.tab})
+			ps = append(ps, Span{Text: " " + label.count, Fg: label.countFg, Bg: bg, Bold: t == m.tab})
 		}
-		spans = append(spans, Span{Text: " ", Bg: bg}, Span{Text: " "})
+		ps = append(ps, Span{Text: " ", Bg: bg})
+		w := 0
+		for _, s := range ps {
+			w += s.width()
+		}
+		start := borderWidth + col
+		end := min(start+w, maxX)
+		out = append(out, tabPill{tab: t, start: start, end: end, spans: ps})
+		col += w + 1 // 1-cell gap after pill
+	}
+	return out
+}
+
+func (m Model) tabAt(cellX int) (Tab, bool) {
+	for _, p := range m.tabPills() {
+		if cellX >= p.start && cellX < p.end {
+			return p.tab, true
+		}
+	}
+	return 0, false
+}
+
+func (m Model) tabBar(c *canvas) {
+	spans := []Span{{Text: " "}}
+	for _, pill := range m.tabPills() {
+		spans = append(spans, pill.spans...)
+		spans = append(spans, Span{Text: " "})
 	}
 	c.add(spans...)
 }

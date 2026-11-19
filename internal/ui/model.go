@@ -135,12 +135,13 @@ type Model struct {
 	askedOwner string
 	answered   bool
 
-	w, h   int
-	tab    Tab
-	tabSet bool // the human or a command chose the tab
-	size   layer.Size
-	paused bool
-	frozen string // the frame on screen while paused
+	w, h        int
+	tab         Tab
+	tabSet      bool // the human or a command chose the tab
+	size        layer.Size
+	paused      bool
+	frozen      string        // the frame on screen while paused
+	frozenMouse tea.MouseMode // the mouse mode in force while paused
 	// sizeHeld: a resize came while paused; Update passes it on to the
 	// renderer on resume.
 	sizeHeld bool
@@ -152,9 +153,10 @@ type Model struct {
 	hint    string
 	hintBad bool
 
-	sel     map[Tab]int
-	scroll  map[Tab]int
-	retired bool // the Retired group is open
+	sel       map[Tab]int
+	scroll    map[Tab]int
+	lastClick clickState
+	retired   bool // the Retired group is open
 	// owed is when each open obligation was first seen (owedSince).
 	owed map[string]time.Time
 
@@ -304,6 +306,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.done(msg)
 	case tea.KeyPressMsg:
 		return m.key(msg)
+	case tea.MouseClickMsg:
+		return m.mouseClick(msg)
+	case tea.MouseWheelMsg:
+		return m.mouseWheel(msg)
 	}
 	return m, nil
 }
@@ -386,6 +392,7 @@ func (m Model) drillDown() (Model, tea.Cmd) {
 	m.hint, m.hintBad = "", false
 	m.sel = map[Tab]int{}
 	m.scroll = map[Tab]int{}
+	m.lastClick = clickState{}
 	m.retired = false
 	m.owed = nil
 	m.mail = mailState{follow: true, expanded: map[string]bool{}}
@@ -412,6 +419,7 @@ func (m Model) popBack() (Model, tea.Cmd) {
 	m.hint, m.hintBad = "", false
 	m.sel = map[Tab]int{TabEpics: d.hubSel}
 	m.scroll = map[Tab]int{}
+	m.lastClick = clickState{}
 	m.retired = false
 	m.owed = nil
 	m.mail = mailState{follow: true, expanded: map[string]bool{}}
@@ -492,11 +500,25 @@ func (m Model) command(c apc.Command) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// mouseMode is the Bubble Tea mouse mode while unpaused. While the Kitty
+// Graph tab is settling or drawing with SGR pixel mouse (1002/1006/1016),
+// Bubble Tea stays in MouseModeNone so it never clobbers pixelmouse.Enable;
+// leaving Kitty Graph transitions MouseModeNone -> MouseModeCellMotion so
+// Bubble Tea re-arms SGR cell mouse (?1002h ?1006h) right after
+// pixelmouse.Disable.
+func (m Model) mouseMode() tea.MouseMode {
+	if m.gfx != nil && (m.gfx.mouse || m.gfx.phase != hidden) {
+		return tea.MouseModeNone
+	}
+	return tea.MouseModeCellMotion
+}
+
 // pause freezes the frame on screen: View keeps returning it, so nothing
 // is written while the layer is hidden, and frames still fold.
 func (m *Model) pause() {
 	if !m.paused {
 		m.frozen = m.render()
+		m.frozenMouse = m.mouseMode()
 		m.paused = true
 		m.shown++
 	}
@@ -504,7 +526,7 @@ func (m *Model) pause() {
 
 func (m *Model) resume() {
 	if m.paused {
-		m.paused, m.frozen = false, ""
+		m.paused, m.frozen, m.frozenMouse = false, "", tea.MouseModeNone
 		m.shown++
 	}
 }
@@ -574,12 +596,13 @@ func hintFor(what string, err error) string {
 // View is the frame: the current one, or while paused the frame that was
 // on screen when the panel paused.
 func (m Model) View() tea.View {
-	frame := m.frozen
+	frame, mouse := m.frozen, m.frozenMouse
 	if !m.paused {
-		frame = m.render()
+		frame, mouse = m.render(), m.mouseMode()
 	}
 	v := tea.NewView(frame)
 	v.AltScreen = true
+	v.MouseMode = mouse
 	return v
 }
 

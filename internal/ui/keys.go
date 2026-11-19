@@ -22,6 +22,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		ask = m.askColours()
 	}
 	m.hint, m.hintBad = "", false
+	m.lastClick = clickState{}
 	if ask != nil {
 		next, cmd := m.key(k)
 		return next, tea.Batch(ask, cmd)
@@ -37,6 +38,41 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "shift+tab":
 		m.cycle(-1)
+		return m, nil
+	case "H":
+		m.cycle(-1)
+		return m, nil
+	case "L":
+		if m.tab == TabGraph && m.graphAt != "" {
+			m.graphAt = ""
+			return m, nil
+		}
+		m.cycle(1)
+		return m, nil
+	case "[":
+		if m.tab != TabGraph {
+			m.cycle(-1)
+			return m, nil
+		}
+	case "]":
+		if m.tab != TabGraph {
+			m.cycle(1)
+			return m, nil
+		}
+	case "alt+1", "f1":
+		m.selectTabIndex(0)
+		return m, nil
+	case "alt+2", "f2":
+		m.selectTabIndex(1)
+		return m, nil
+	case "alt+3", "f3":
+		m.selectTabIndex(2)
+		return m, nil
+	case "alt+4", "f4":
+		m.selectTabIndex(3)
+		return m, nil
+	case "alt+5", "f5":
+		m.selectTabIndex(4)
 		return m, nil
 	case "z":
 		return m, m.zoom()
@@ -129,6 +165,13 @@ func (m *Model) cycle(d int) {
 		}
 	}
 	m.tab, m.tabSet = tabs[(i+d+len(tabs))%len(tabs)], true
+}
+
+func (m *Model) selectTabIndex(idx int) {
+	tabs := m.tabs()
+	if idx >= 0 && idx < len(tabs) {
+		m.tab, m.tabSet = tabs[idx], true
+	}
 }
 
 func (m *Model) move(d int) {
@@ -225,13 +268,21 @@ func (m *Model) stepBack() bool {
 	return false
 }
 
-// enter acts on the selected row: jump to a member's pane, drill into an
-// Epic in-place, or open a message's excerpt.
+// enter acts on the selected row: jump to a member's pane, open the
+// hand-back on Overview, drill into an Epic in-place, or toggle a
+// message's excerpt.
 func (m Model) enter() (tea.Model, tea.Cmd) {
 	switch m.tab {
-	case TabMembers, TabOverview:
+	case TabMembers:
 		if handle := m.selectedHandle(); handle != "" {
 			return m, m.focus(handle)
+		}
+	case TabOverview:
+		if handle := m.selectedHandle(); handle != "" {
+			return m, m.focus(handle)
+		}
+		if hbRow, ok := m.overviewHandBackRow(); ok && m.sel[TabOverview] == hbRow {
+			return m, m.openHandBack()
 		}
 	case TabEpics:
 		return m.drillDown()
