@@ -231,12 +231,34 @@ func ago(now, t time.Time) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
-// wrap breaks untrusted text into lines of at most w cells.
+// wrap breaks untrusted text paragraph-by-paragraph into lines of at most w
+// cells, preserving explicit newlines and blank lines.
 func wrap(text string, w int) []string {
 	if w <= 0 {
 		return nil
 	}
-	return strings.Split(ansi.Wrap(clean(text), w, " "), "\n")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return nil
+	}
+	var out []string
+	for _, para := range strings.Split(text, "\n") {
+		out = append(out, wrapLine(para, w)...)
+	}
+	return out
+}
+
+func wrapLine(s string, w int) []string {
+	if w <= 0 {
+		return nil
+	}
+	c := clean(s)
+	if c == "" {
+		return []string{""}
+	}
+	return strings.Split(ansi.Wrap(c, w, " "), "\n")
 }
 
 var blockedOnMe = regexp.MustCompile(`(?i)blocked on me`)

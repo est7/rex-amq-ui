@@ -49,10 +49,13 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "g", "home":
 		m.sel[m.tab] = 0
+		m.scroll[m.tab] = 0
 		m.unfollow()
 		return m, nil
 	case "G", "end":
-		m.sel[m.tab] = max(m.rowCount(m.tab)-1, 0)
+		last := max(m.rowCount(m.tab)-1, 0)
+		m.sel[m.tab] = last
+		m.scroll[m.tab] = m.maxScroll(m.tab, last)
 		return m, nil
 	case "esc", "q":
 		if m.stepBack() {
@@ -86,6 +89,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if len(s) == 1 && s[0] >= '1' && s[0] <= '9' && (m.tab == TabMembers || m.tab == TabEpics) {
 		if i := int(s[0] - '1'); i < m.rowCount(m.tab) {
 			m.sel[m.tab] = i
+			m.scroll[m.tab] = 0
 		}
 		return m, nil
 	}
@@ -123,9 +127,44 @@ func (m *Model) cycle(d int) {
 }
 
 func (m *Model) move(d int) {
-	m.sel[m.tab] = clampSel(m.sel[m.tab]+d, m.rowCount(m.tab))
-	if d < 0 {
-		m.unfollow()
+	if d == 0 {
+		return
+	}
+	t := m.tab
+	n := m.rowCount(t)
+	if n == 0 {
+		m.sel[t] = 0
+		m.scroll[t] = 0
+		return
+	}
+	sel := clampSel(m.sel[t], n)
+	maxOff := m.maxScroll(t, sel)
+	off := min(max(m.scroll[t], 0), maxOff)
+	if d > 0 {
+		if off < maxOff {
+			m.scroll[t] = off + 1
+			return
+		}
+		next := clampSel(sel+1, n)
+		if next != sel {
+			m.sel[t] = next
+			m.scroll[t] = 0
+		} else {
+			m.scroll[t] = maxOff
+		}
+		return
+	}
+	m.unfollow()
+	if off > 0 {
+		m.scroll[t] = off - 1
+		return
+	}
+	prev := clampSel(sel-1, n)
+	if prev != sel {
+		m.sel[t] = prev
+		m.scroll[t] = m.maxScroll(t, prev)
+	} else {
+		m.scroll[t] = 0
 	}
 }
 
@@ -150,11 +189,13 @@ func (m *Model) stepBack() bool {
 			return false
 		}
 		m.sel[TabMail] = clampSel(m.sel[TabMail], m.rowCount(TabMail))
+		m.scroll[TabMail] = 0
 		return true
 	case TabMembers:
 		if m.retired {
 			m.retired = false
 			m.sel[TabMembers] = clampSel(m.sel[TabMembers], m.rowCount(TabMembers))
+			m.scroll[TabMembers] = 0
 			return true
 		}
 	case TabGraph:

@@ -159,16 +159,34 @@ func TestViewMapping(t *testing.T) {
 			t.Fatalf("blocked line %q, other line %q", blocked, plainLine)
 		}
 	})
-	t.Run("a long hand-back pulls Blocked on me up", func(t *testing.T) {
+	t.Run("a long hand-back renders uncapped with Blocked on me highlighted", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{})
 		p := *m.st.Panel
 		v := *p.View
-		v.HandBack = &adapter.HandBack{By: "claude-01", Seq: 2, At: m.now(), Body: strings.Repeat("line\n", 12) + "## Blocked on me\n- sign the release"}
+		var body strings.Builder
+		for i := 1; i <= 12; i++ {
+			fmt.Fprintf(&body, "item %02d\n", i)
+		}
+		body.WriteString("\n## Blocked on me\n- sign the release")
+		v.HandBack = &adapter.HandBack{By: "claude-01", Seq: 2, At: m.now(), Body: body.String()}
 		p.View = &v
 		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: adapter.Header{Stream: m.st.Stream, Seq: m.st.Seq + 1}, Panel: p}})
 		f := m.Frame()
-		if !contains(f, "… ## Blocked on me") || !contains(f, "- sign the release") || !contains(f, "more lines") {
+		if !contains(f, "item 01") || !contains(f, "item 12") || !contains(f, "## Blocked on me") || !contains(f, "- sign the release") || contains(f, "more lines") {
 			t.Fatalf("\n%s", plain(f))
+		}
+		yellow := sgrFg(m.pal.Yellow)
+		var blockedLine, signLine string
+		for _, l := range strings.Split(f, "\n") {
+			switch {
+			case strings.Contains(plain(l), "## Blocked on me"):
+				blockedLine = l
+			case strings.Contains(plain(l), "- sign the release"):
+				signLine = l
+			}
+		}
+		if !strings.Contains(blockedLine, yellow) || !strings.Contains(signLine, yellow) {
+			t.Fatalf("expected yellow Blocked on me lines: header=%q item=%q", blockedLine, signLine)
 		}
 	})
 	t.Run("no-view session shows the quiet narrator line", func(t *testing.T) {
@@ -815,6 +833,174 @@ func TestDrillDown(t *testing.T) {
 		m = press(t, m, "esc")
 		if want := []subCall{{"session:s", 1}, {"session:hub-opt", 2}}; !reflect.DeepEqual(subs, want) {
 			t.Fatalf("subs %+v, want %+v", subs, want)
+		}
+	})
+}
+
+func TestUncappedWrappingAndLineScrolling(t *testing.T) {
+	t.Run("wrap preserves paragraphs, blank lines, and lists", func(t *testing.T) {
+		got := wrap("# Title\n\n- first bullet item\n- second bullet\r\n\r\nfinal paragraph\n", 40)
+		want := []string{"# Title", "", "- first bullet item", "- second bullet", "", "final paragraph"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("wrap = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("uncapped mail excerpt shows ellipsis only when adapter truncated it", func(t *testing.T) {
+		w, h := refSize(t, layer.Board)
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		p := *m.st.Panel
+		v := *p.View
+		var body strings.Builder
+		for i := 1; i <= 10; i++ {
+			fmt.Fprintf(&body, "paragraph %02d\n", i)
+		}
+		v.ControlPlane = []adapter.ViewMessage{
+			{Ref: "2026-11-16T09-00-00.000Z_m1", Body: body.String(), Truncated: false},
+			{Ref: "2026-11-16T09-02-00.000Z_m2", Body: "cut short body", Truncated: true},
+		}
+		p.View = &v
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: next(m), Panel: p}})
+
+		// Expand m1 (10 lines, Truncated=false): all 10 lines shown, NO trailing ellipsis line.
+		m = press(t, m, "g", "space")
+		f := m.Frame()
+		if !contains(f, "paragraph 01") || !contains(f, "paragraph 10") {
+			t.Fatalf("m1 excerpt truncated unexpectedly:\n%s", plain(f))
+		}
+		for _, l := range lines(f) {
+			if strings.TrimSpace(strings.Trim(l, "│")) == "…" {
+				t.Fatalf("unexpected ellipsis for non-truncated excerpt:\n%s", plain(f))
+			}
+		}
+
+		// Expand m2 (Truncated=true): trailing ellipsis line IS shown.
+		m = press(t, m, "j", "space")
+		foundEllipsis := false
+		for _, l := range lines(m.Frame()) {
+			if strings.TrimSpace(strings.Trim(l, "│")) == "…" {
+				foundEllipsis = true
+			}
+		}
+		if !foundEllipsis {
+			t.Fatalf("expected ellipsis for adapter-truncated excerpt:\n%s", plain(m.Frame()))
+		}
+	})
+
+	t.Run("tall expanded mail scrolls line-by-line before advancing row", func(t *testing.T) {
+		// 80x12 => innerH=10, contentHeight=7, mail list viewport=6 lines.
+		const w, h = 80, 12
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		p := *m.st.Panel
+		v := *p.View
+		var body strings.Builder
+		for i := 1; i <= 10; i++ {
+			fmt.Fprintf(&body, "mail-line-%02d\n", i)
+		}
+		v.ControlPlane = []adapter.ViewMessage{
+			{Ref: "2026-11-16T09-00-00.000Z_m1", Body: body.String(), Truncated: false},
+		}
+		p.View = &v
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: next(m), Panel: p}})
+
+		// Row 0 expanded: 1 header + 10 body lines = 11 lines; viewport = 6 => maxOff = 5.
+		m = press(t, m, "g", "space")
+		if m.sel[TabMail] != 0 || m.scroll[TabMail] != 0 {
+			t.Fatalf("initial expand: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		if !contains(m.Frame(), "build it") || !contains(m.Frame(), "mail-line-05") || contains(m.Frame(), "mail-line-06") {
+			t.Fatalf("top of tall mail:\n%s", plain(m.Frame()))
+		}
+
+		// Step down 5 lines within row 0.
+		for stepIdx := 1; stepIdx <= 5; stepIdx++ {
+			m = press(t, m, "j")
+			if m.sel[TabMail] != 0 || m.scroll[TabMail] != stepIdx {
+				t.Fatalf("step %d: sel=%d scroll=%d, want sel=0 scroll=%d", stepIdx, m.sel[TabMail], m.scroll[TabMail], stepIdx)
+			}
+			if bad := holes(m.Frame(), w, h); bad != nil {
+				t.Fatalf("step %d holes: %v", stepIdx, bad)
+			}
+		}
+		if !contains(m.Frame(), "mail-line-10") || contains(m.Frame(), "build it") {
+			t.Fatalf("bottom of tall mail:\n%s", plain(m.Frame()))
+		}
+
+		// Next j advances to row 1 at scroll 0.
+		m = press(t, m, "j")
+		if m.sel[TabMail] != 1 || m.scroll[TabMail] != 0 {
+			t.Fatalf("advance to row 1: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		// Short row 1 -> row 2 takes a single j.
+		m = press(t, m, "j")
+		if m.sel[TabMail] != 2 || m.scroll[TabMail] != 0 {
+			t.Fatalf("short row advance: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		// k back to row 1 (short), then k into row 0 lands at bottom of row 0 (scroll=5).
+		m = press(t, m, "k")
+		if m.sel[TabMail] != 1 || m.scroll[TabMail] != 0 {
+			t.Fatalf("back to row 1: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		m = press(t, m, "k")
+		if m.sel[TabMail] != 0 || m.scroll[TabMail] != 5 || !contains(m.Frame(), "mail-line-10") {
+			t.Fatalf("enter tall row 0 from below: sel=%d scroll=%d\n%s", m.sel[TabMail], m.scroll[TabMail], plain(m.Frame()))
+		}
+		// k steps up line-by-line back to top of row 0.
+		for stepIdx := 4; stepIdx >= 0; stepIdx-- {
+			m = press(t, m, "k")
+			if m.sel[TabMail] != 0 || m.scroll[TabMail] != stepIdx {
+				t.Fatalf("up step %d: sel=%d scroll=%d", stepIdx, m.sel[TabMail], m.scroll[TabMail])
+			}
+		}
+		if !contains(m.Frame(), "build it") {
+			t.Fatalf("back at top of row 0:\n%s", plain(m.Frame()))
+		}
+	})
+
+	t.Run("tall overview narrative and hand-back scroll line-by-line with j/k/g/G", func(t *testing.T) {
+		// 80x12 => innerH=10, contentHeight=7.
+		const w, h = 80, 12
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "overview"})
+		p := *m.st.Panel
+		v := *p.View
+		var nar, hb strings.Builder
+		for i := 1; i <= 10; i++ {
+			fmt.Fprintf(&nar, "nar-line-%02d\n", i)
+			fmt.Fprintf(&hb, "hb-line-%02d\n", i)
+		}
+		v.Narrative = &adapter.ViewNarrative{Text: nar.String(), At: m.now()}
+		v.HandBack = &adapter.HandBack{By: "claude-01", Seq: 2, At: m.now(), Body: hb.String()}
+		p.View = &v
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: next(m), Panel: p}})
+
+		// Move past the 5 alerts to the narrative row (row 5).
+		for range 5 {
+			m = press(t, m, "j")
+		}
+		if m.sel[TabOverview] != 5 || !contains(m.Frame(), "nar-line-01") || contains(m.Frame(), "nar-line-10") {
+			t.Fatalf("top of narrative: sel=%d\n%s", m.sel[TabOverview], plain(m.Frame()))
+		}
+		// Scroll down within narrative until nar-line-10 is visible, without leaving row 5.
+		for !contains(m.Frame(), "nar-line-10") {
+			m = press(t, m, "j")
+			if m.sel[TabOverview] != 5 {
+				t.Fatalf("left narrative row 5 before showing nar-line-10: sel=%d", m.sel[TabOverview])
+			}
+		}
+
+		// G jumps to the last row (hand-back) with its bottom line visible.
+		m = press(t, m, "G")
+		if m.sel[TabOverview] != m.rowCount(TabOverview)-1 || !contains(m.Frame(), "hb-line-10") {
+			t.Fatalf("G on tall hand-back: sel=%d scroll=%d\n%s", m.sel[TabOverview], m.scroll[TabOverview], plain(m.Frame()))
+		}
+		if bad := holes(m.Frame(), w, h); bad != nil {
+			t.Fatalf("G holes: %v", bad)
+		}
+
+		// g resets to row 0 top.
+		m = press(t, m, "g")
+		if m.sel[TabOverview] != 0 || m.scroll[TabOverview] != 0 || !contains(m.Frame(), "SYSTEM ALERTS") {
+			t.Fatalf("g reset: sel=%d scroll=%d\n%s", m.sel[TabOverview], m.scroll[TabOverview], plain(m.Frame()))
 		}
 	})
 }

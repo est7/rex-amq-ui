@@ -153,6 +153,7 @@ type Model struct {
 	hintBad bool
 
 	sel     map[Tab]int
+	scroll  map[Tab]int
 	retired bool // the Retired group is open
 	// owed is when each open obligation was first seen (owedSince).
 	owed map[string]time.Time
@@ -192,7 +193,7 @@ func New(d Deps, o Options) Model {
 	if d.Clock == nil {
 		d.Clock = SystemClock{}
 	}
-	m := Model{deps: d, session: o.Session, pal: theme.Default(), size: o.Size, sel: map[Tab]int{},
+	m := Model{deps: d, session: o.Session, pal: theme.Default(), size: o.Size, sel: map[Tab]int{}, scroll: map[Tab]int{},
 		mail: mailState{follow: true, expanded: map[string]bool{}}}
 	m.lay.Focused = o.Focused
 	m.lay.Size = o.Size
@@ -317,10 +318,20 @@ func (m *Model) settle() {
 		m.tab = tabs[0]
 	}
 	if m.mail.follow {
-		m.sel[TabMail] = len(m.mailRows()) - 1
+		last := max(len(m.mailRows())-1, 0)
+		if m.sel[TabMail] != last {
+			m.sel[TabMail] = last
+			m.scroll[TabMail] = 0
+		}
 	}
 	for _, t := range tabs {
+		prev := m.sel[t]
 		m.sel[t] = clampSel(m.sel[t], m.rowCount(t))
+		if m.sel[t] != prev {
+			m.scroll[t] = 0
+		} else {
+			m.scroll[t] = min(max(m.scroll[t], 0), m.maxScroll(t, m.sel[t]))
+		}
 	}
 	if _, ok := m.replayIndex(); !ok {
 		m.graphAt = ""
@@ -373,6 +384,7 @@ func (m Model) drillDown() (Model, tea.Cmd) {
 	m.tab, m.tabSet = TabOverview, true
 	m.hint, m.hintBad = "", false
 	m.sel = map[Tab]int{}
+	m.scroll = map[Tab]int{}
 	m.retired = false
 	m.owed = nil
 	m.mail = mailState{follow: true, expanded: map[string]bool{}}
@@ -398,6 +410,7 @@ func (m Model) popBack() (Model, tea.Cmd) {
 	m.tab, m.tabSet = TabEpics, true
 	m.hint, m.hintBad = "", false
 	m.sel = map[Tab]int{TabEpics: d.hubSel}
+	m.scroll = map[Tab]int{}
 	m.retired = false
 	m.owed = nil
 	m.mail = mailState{follow: true, expanded: map[string]bool{}}

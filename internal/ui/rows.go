@@ -233,6 +233,7 @@ func (m *Model) toggleExcerpt() {
 	} else {
 		m.mail.expanded[id] = true
 	}
+	m.scroll[TabMail] = 0
 }
 
 // graphMessages are the messages the Graph replays, oldest first; with
