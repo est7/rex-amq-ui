@@ -1193,3 +1193,123 @@ func TestMailOpenAndParticipantCycle(t *testing.T) {
 		}
 	})
 }
+
+func TestDrawerCompactBadgesAndDynamicWidths(t *testing.T) {
+	t.Run("compact model/effort badges in Drawer", func(t *testing.T) {
+		cases := []struct {
+			model, effort, want string
+		}{
+			{"gemini-4-neon-high", "high", "neon/hi"},
+			{"gemini-4-carbon-high", "high", "carbon/hi"},
+			{"claude-opus-5-5", "high", "opus/hi"},
+			{"claude-sonnet-4-6", "medium", "sonnet/med"},
+			{"claude-haiku-4-5-20251001", "low", "haiku/lo"},
+			{"auto/gpt-6.1-sol", "high", "sol/hi"},
+			{"openai/gpt-5.4-codex", "xhigh", "codex/xhi"},
+			{"gpt-5", "high", "gpt-5/hi"},
+			{"gpt-4o", "medium", "gpt-4o/med"},
+			{"opus", "high", "opus/hi"},
+			{"sonnet", "", "sonnet"},
+			{"", "", "—"},
+		}
+		for _, tc := range cases {
+			got := memberModelText(adapter.Agent{Model: tc.model, Effort: tc.effort}, false)
+			if got != tc.want {
+				t.Errorf("memberModelText(%q, %q, drawer) = %q, want %q", tc.model, tc.effort, got, tc.want)
+			}
+		}
+		// Board keeps the full model/effort.
+		if got := memberModelText(adapter.Agent{Model: "gemini-4-neon-high", Effort: "high"}, true); got != "gemini-4-neon-high/high" {
+			t.Errorf("board model = %q", got)
+		}
+	})
+
+	t.Run("dynamic member column widths give Task more room in Drawer", func(t *testing.T) {
+		w, h := refSize(t, layer.Drawer)
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "members"})
+		// Replace agents with short handles and verbose model IDs + long task descriptions.
+		a1 := adapter.Agent{
+			Handle: "agy-72", Role: "lead", Model: "gemini-4-neon-high", Effort: "high",
+			Task:      "implement responsive drawer column widths",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive},
+			Activity:  adapter.Activity{State: "working"},
+		}
+		a2 := adapter.Agent{
+			Handle: "codex-37", Role: "rev", Model: "auto/gpt-6.1-sol", Effort: "xhigh",
+			Task:      "review slice s3 mail and overview layout",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive},
+			Activity:  adapter.Activity{State: "working"},
+		}
+		snap := adapter.Snapshot{
+			Header: adapter.Header{Schema: 1, Stream: "s-compact", Seq: 1},
+			Scope:  m.st.Scope,
+			Agents: []adapter.Agent{a1, a2},
+			Panel:  m.st.Panel,
+		}
+		m = step(t, m, adapter.FrameUpdate{Frame: snap})
+		f := m.Frame()
+		if bad := holes(f, w, h); bad != nil {
+			t.Fatalf("drawer holes: %v", bad)
+		}
+		for _, want := range []string{
+			"neon/hi",
+			"sol/xhi",
+			"implement responsive drawer column widths",
+			"review slice s3 mail and overview layout",
+		} {
+			if !contains(f, want) {
+				t.Fatalf("drawer members missing %q:\n%s", want, plain(f))
+			}
+		}
+		// Narrow drawer (55 cols) still preserves task text and paints with zero holes.
+		m = step(t, m, tea.WindowSizeMsg{Width: 55, Height: 20})
+		if bad := holes(m.Frame(), 55, 20); bad != nil {
+			t.Fatalf("narrow drawer holes: %v", bad)
+		}
+		if !contains(m.Frame(), "neon/hi") || !contains(m.Frame(), "implement responsive") {
+			t.Fatalf("narrow drawer lost task:\n%s", plain(m.Frame()))
+		}
+	})
+
+	t.Run("long Overview alert reasons wrap cleanly in Drawer", func(t *testing.T) {
+		w, h := refSize(t, layer.Drawer)
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "overview"})
+		longSubject := "S3 uncapped Mail/Overview scrolling, o open in md-viewer, p participant filter, and responsive Drawer widths"
+		longMsg := adapter.Message{
+			ID:        "2026-11-16T09-07-00.000Z_m_long",
+			From:      "claude-01",
+			To:        []string{"codex-03"},
+			Subject:   longSubject,
+			State:     adapter.MsgQueued,
+			Bounced:   true,
+			CreatedAt: m.now().Add(-2 * time.Minute),
+		}
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.MessageUpsert{Header: next(m), Message: longMsg}})
+		f := m.Frame()
+		if bad := holes(f, w, h); bad != nil {
+			t.Fatalf("wrapped alert holes: %v", bad)
+		}
+		// Both the start and end of the long bounced subject appear without truncation.
+		if !contains(f, "S3 uncapped Mail/Overview") || !contains(f, "responsive Drawer widths") {
+			t.Fatalf("long alert reason did not wrap cleanly:\n%s", plain(f))
+		}
+		// Selecting the wrapped alert highlights all its continuation lines on Overlay.
+		for range 4 {
+			m = press(t, m, "j")
+		}
+		overlay := sgrBg(m.pal.Overlay)
+		var highlighted int
+		for _, l := range strings.Split(m.Frame(), "\n") {
+			p := plain(l)
+			if strings.Contains(p, "S3 uncapped") || strings.Contains(p, "responsive Drawer widths") {
+				if !strings.Contains(l, overlay) {
+					t.Errorf("wrapped alert line missing overlay bg: %q", p)
+				}
+				highlighted++
+			}
+		}
+		if highlighted < 2 {
+			t.Fatalf("expected wrapped alert to span >=2 highlighted lines, got %d\n%s", highlighted, plain(m.Frame()))
+		}
+	})
+}

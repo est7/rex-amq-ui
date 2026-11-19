@@ -2,10 +2,10 @@
 │ auth-refresh · crew:pair                                                                                                                                       ● Live  Board │
 │  Overview ●5   Members 3   Mail 3   Graph                                                                                                                                    │
 │ Lead                                                                                                                                                                         │
-│ 1   ● orchestrator(claude-01)    opus/high   main       auth refresh                                                                                                      !1 │
+│ 1   ● orchestrator(claude-01) opus/high main       auth refresh                                                                                                           !1 │
 │ Active                                                                                                                                                                       │
-│ 2 ▶ ● implementer(claude-02)     sonnet      main       token refresh                                                                                                  !1 ✉1 │
-│ 3   ● narrator(pi-04)            —           review     narrate                                                                                                           !1 │
+│ 2 ▶ ● implementer(claude-02)  sonnet    main       token refresh                                                                                                       !1 ✉1 │
+│ 3   ● narrator(pi-04)         —         review     narrate                                                                                                                !1 │
 │ ▸ Retired 1  r to show                                                                                                                                                       │
 │                                                                                                                                                                              │
 │                                                                                                                                                                              │

@@ -139,8 +139,19 @@ func (m Model) overviewEntries() []entry {
 			if i == m.sel[TabOverview] {
 				bg = p.Overlay
 			}
-			add(i, bg, []Span{{Text: " " + icon + " ", Fg: fg, Bold: true}, {Text: a.text, Fg: p.Fg}},
-				Span{Text: " " + ago(now, a.since) + " ", Fg: p.Muted})
+			prefix := " " + icon + " "
+			age := Span{Text: " " + ago(now, a.since) + " ", Fg: p.Muted}
+			textW := m.innerW() - ansi.StringWidth(prefix) - age.width()
+			if textW <= 0 {
+				add(i, bg, []Span{{Text: prefix, Fg: fg, Bold: true}, {Text: a.text, Fg: p.Fg}}, age)
+				continue
+			}
+			wrapped := wrapLine(a.text, textW)
+			add(i, bg, []Span{{Text: prefix, Fg: fg, Bold: true}, {Text: wrapped[0], Fg: p.Fg}}, age)
+			indent := strings.Repeat(" ", ansi.StringWidth(prefix))
+			for _, cont := range wrapped[1:] {
+				add(i, bg, []Span{{Text: indent + cont, Fg: p.Fg}})
+			}
 		}
 		add(len(as)-1, p.Bg, nil)
 	}
@@ -257,7 +268,10 @@ func (m Model) memberEntries() []entry {
 	p := m.pal
 	var es []entry
 	last := group(-1)
-	for i, a := range m.members() {
+	ms := m.members()
+	wide := m.innerW() >= 100
+	nameW, modelW := m.memberColumns(ms, wide)
+	for i, a := range ms {
 		if g := m.groupOf(a); g != last {
 			last = g
 			if g == groupRetired {
@@ -266,7 +280,7 @@ func (m Model) memberEntries() []entry {
 				es = append(es, entry{left: []Span{{Text: " " + groupNames[g], Fg: p.Muted, Bold: true}}, bg: p.Bg, row: -1})
 			}
 		}
-		es = append(es, m.memberEntry(a, i))
+		es = append(es, m.memberEntry(a, i, wide, nameW, modelW))
 	}
 	if n := m.retiredCount(); n > 0 && !m.retired {
 		es = append(es, entry{left: []Span{{Text: fmt.Sprintf(" ▸ Retired %d", n), Fg: p.Muted, Bold: true}, {Text: "  r to show", Fg: p.Faint}}, bg: p.Bg, row: -1})
@@ -285,7 +299,164 @@ func (m Model) membersView(c *canvas) {
 	list(c, m.memberEntries(), m.sel[TabMembers], m.scroll[TabMembers])
 }
 
-func (m Model) memberEntry(a adapter.Agent, i int) entry {
+func memberDisplayName(a adapter.Agent) string {
+	if a.Role != "" {
+		return a.Role + "(" + a.Handle + ")"
+	}
+	return a.Handle
+}
+
+func (m Model) memberColumns(ms []adapter.Agent, wide bool) (nameW, modelW int) {
+	maxName, maxModel := 0, 0
+	for _, a := range ms {
+		if w := ansi.StringWidth(clean(memberDisplayName(a))); w > maxName {
+			maxName = w
+		}
+		if m.groupOf(a) != groupRetired {
+			if w := ansi.StringWidth(clean(memberModelText(a, wide))); w > maxModel {
+				maxModel = w
+			}
+		}
+	}
+	if wide {
+		return min(max(maxName, 16), 30), min(max(maxModel, 8), 24)
+	}
+	nameW = min(max(maxName, 8), 24)
+	modelW = min(max(maxModel, 1), 12)
+	const rowOverhead = 9 // " " + idx(2) + mark(2) + dot(1) + " "(1) + 2 column spaces
+	taskBudget := max(m.innerW()/3, 18)
+	if avail := m.innerW() - rowOverhead - taskBudget; avail > 0 && nameW+modelW > avail {
+		modelW = min(modelW, max(avail/3, 6))
+		nameW = max(min(nameW, avail-modelW), min(8, avail))
+		if nameW+modelW > avail {
+			modelW = max(avail-nameW, 1)
+		}
+	}
+	return nameW, modelW
+}
+
+func compactEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "high":
+		return "hi"
+	case "medium":
+		return "med"
+	case "low":
+		return "lo"
+	case "xhigh":
+		return "xhi"
+	case "minimal":
+		return "min"
+	default:
+		return strings.TrimSpace(effort)
+	}
+}
+
+func isVersionToken(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range tok {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			continue
+		}
+		if r == '.' {
+			continue
+		}
+		return false
+	}
+	return hasDigit
+}
+
+func isEffortToken(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "high", "medium", "low", "xhigh", "minimal":
+		return true
+	}
+	return false
+}
+
+func startsWithLetter(s string) bool {
+	if s == "" {
+		return false
+	}
+	b := s[0]
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func compactModelName(model, effort string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return ""
+	}
+	if i := strings.LastIndex(m, "/"); i >= 0 && i+1 < len(m) {
+		m = m[i+1:]
+	}
+	tokens := strings.Split(m, "-")
+	if strings.TrimSpace(effort) != "" && len(tokens) > 1 && isEffortToken(tokens[len(tokens)-1]) {
+		tokens = tokens[:len(tokens)-1]
+	}
+	for len(tokens) > 1 {
+		last := strings.ToLower(tokens[len(tokens)-1])
+		if last == "latest" || last == "preview" || (len(last) == 8 && isVersionToken(last)) {
+			tokens = tokens[:len(tokens)-1]
+			continue
+		}
+		break
+	}
+	if len(tokens) <= 1 {
+		return strings.Join(tokens, "-")
+	}
+	switch strings.ToLower(tokens[0]) {
+	case "claude", "gemini":
+		var kept []string
+		for _, tok := range tokens[1:] {
+			if !isVersionToken(tok) {
+				kept = append(kept, tok)
+			}
+		}
+		if len(kept) > 0 {
+			return strings.Join(kept, "-")
+		}
+	case "gpt":
+		var named []string
+		for _, tok := range tokens[1:] {
+			if !isVersionToken(tok) && startsWithLetter(tok) {
+				named = append(named, tok)
+			}
+		}
+		if len(named) > 0 {
+			return strings.Join(named, "-")
+		}
+	}
+	return strings.Join(tokens, "-")
+}
+
+func memberModelText(a adapter.Agent, wide bool) string {
+	if wide {
+		model := a.Model
+		if a.Effort != "" {
+			model += "/" + a.Effort
+		}
+		return orDash(model)
+	}
+	model := compactModelName(a.Model, a.Effort)
+	eff := compactEffort(a.Effort)
+	switch {
+	case model != "" && eff != "":
+		return model + "/" + eff
+	case model != "":
+		return model
+	case eff != "":
+		return eff
+	default:
+		return "—"
+	}
+}
+
+func (m Model) memberEntry(a adapter.Agent, i int, wide bool, nameW, modelW int) entry {
 	p := m.pal
 	bg := p.Bg
 	if i == m.sel[TabMembers] {
@@ -300,19 +471,11 @@ func (m Model) memberEntry(a adapter.Agent, i int) entry {
 		mark = Span{Text: "▶ ", Fg: p.Aqua, Bold: true}
 	}
 	dot, dotFg := m.statusDot(a)
-	name := a.Handle
-	if a.Role != "" {
-		name = a.Role + "(" + a.Handle + ")"
-	}
+	name := memberDisplayName(a)
 	retired := m.groupOf(a) == groupRetired
 	nameFg := p.Fg
 	if retired {
 		nameFg = p.Faint
-	}
-	wide := m.innerW() >= 100
-	nameW := 26
-	if !wide {
-		nameW = 24
 	}
 	left := []Span{{Text: " " + idx, Fg: p.Faint}, mark, {Text: dot + " ", Fg: dotFg}, {Text: fit(name, nameW), Fg: nameFg, Bold: i == m.sel[TabMembers]}}
 	if retired {
@@ -323,11 +486,7 @@ func (m Model) memberEntry(a adapter.Agent, i int) entry {
 		left = append(left, Span{Text: " " + reason, Fg: p.Faint, Italic: true})
 		return entry{left: left, bg: bg, row: i}
 	}
-	model := a.Model
-	if a.Effort != "" {
-		model += "/" + a.Effort
-	}
-	left = append(left, Span{Text: " " + fit(orDash(model), 11), Fg: p.Muted})
+	left = append(left, Span{Text: " " + fit(memberModelText(a, wide), modelW), Fg: p.Muted})
 	if wide {
 		left = append(left, Span{Text: " " + fit(a.Tab, 10), Fg: p.Faint})
 	}
