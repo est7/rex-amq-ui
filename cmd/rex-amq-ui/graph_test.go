@@ -166,10 +166,10 @@ func TestGraphTabProgram(t *testing.T) {
 	has := func(s string) func() bool {
 		return func() bool { raw, _ := out.snapshot(); return strings.Contains(raw, s) }
 	}
-	waitFor(t, "the Kitty frame", has("\x1b_Ga=T,f=32,t=t,s=1080,v=748,"))
+	waitFor(t, "the Kitty frame", has("\x1b_Ga=T,f=32,t=t,s=1062,v=704,"))
 	waitFor(t, "pixel mouse on", has(pixelmouse.Enable))
-	if raw, _ := out.snapshot(); !strings.Contains(raw, "\x1b7\x1b[4;1H\x1b_Ga=T") {
-		t.Fatalf("the frame is not placed at the region's top-left cell (row 4, column 1)")
+	if raw, _ := out.snapshot(); !strings.Contains(raw, "\x1b7\x1b[5;2H\x1b_Ga=T") {
+		t.Fatalf("the frame is not placed at the region's top-left cell (row 5, column 2)")
 	}
 
 	// The first frame can beat the adapter's snapshot; click once the

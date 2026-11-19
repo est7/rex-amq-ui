@@ -109,7 +109,7 @@ func TestOpenCreatesSizedDisownedLayer(t *testing.T) {
 			t.Fatal(err)
 		}
 		b := p.Layout.Block
-		wantCols, wantRows, wantBounds := 70, 48, rexctl.Bounds{0.64, 0.02, 0.35, 0.96}
+		wantCols, wantRows, wantBounds := 84, 48, rexctl.Bounds{0.57, 0.02, 0.42, 0.96}
 		wantArgv := []string{"/bin/rex-amq-ui", "--adapter-bin", "/x/adapter", "--session", sess, "--focus", paneA, "--tab", "members"}
 		if size == Board {
 			wantCols, wantRows, wantBounds = 176, 44, rexctl.Bounds{0.06, 0.06, 0.88, 0.88}

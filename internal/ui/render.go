@@ -12,9 +12,11 @@ import (
 	"github.com/est7/rex-amq-ui/internal/adapter"
 )
 
-// Frame layout: two header lines (title, tabs), the tab's content, and a
-// footer line.
+// Frame layout: a 1-cell rounded border around the panel when at least 2x2,
+// containing two header lines (title, tabs), the tab's content, and a footer
+// line.
 const (
+	borderWidth = 1
 	headerLines = 2
 	footerLines = 1
 )
@@ -22,16 +24,22 @@ const (
 // Rect is a rectangle of cells in the frame, from its top-left corner.
 type Rect struct{ X, Y, W, H int }
 
-func (m Model) contentHeight() int { return max(m.h-headerLines-footerLines, 0) }
+func (m Model) framed() bool       { return m.w >= 2*borderWidth && m.h >= 2*borderWidth }
+func (m Model) innerW() int        { return max(m.w-2*borderWidth, 0) }
+func (m Model) innerH() int        { return max(m.h-2*borderWidth, 0) }
+func (m Model) contentHeight() int { return max(m.innerH()-headerLines-footerLines, 0) }
 
 func (m Model) render() string {
-	c := newCanvas(m.w, m.h, m.pal.Bg)
-	if c.w == 0 || c.h == 0 {
+	if m.w <= 0 || m.h <= 0 {
 		return ""
 	}
+	if !m.framed() {
+		return newCanvas(m.w, m.h, m.pal.Bg).String()
+	}
+	c := newCanvas(m.innerW(), m.innerH(), m.pal.Bg)
 	m.header(c)
 	m.tabBar(c)
-	body := newCanvas(m.w, m.contentHeight(), m.pal.Bg)
+	body := newCanvas(m.innerW(), m.contentHeight(), m.pal.Bg)
 	switch {
 	case !m.st.Ready():
 		m.waiting(body)
@@ -47,7 +55,7 @@ func (m Model) render() string {
 		m.graphView(body)
 	}
 	if body.h > 0 {
-		for _, l := range strings.Split(body.String(), "\n") {
+		for _, l := range body.rows() {
 			if !c.full() {
 				c.lines = append(c.lines, l)
 			}
@@ -57,7 +65,7 @@ func (m Model) render() string {
 		c.blank()
 	}
 	m.footer(c)
-	return c.String()
+	return frameCanvas(m.w, m.h, m.pal.Bg, m.pal.Faint, c)
 }
 
 func (m Model) header(c *canvas) {

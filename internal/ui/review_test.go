@@ -24,8 +24,8 @@ func TestReplayCursorSurvivesChanges(t *testing.T) {
 	replaying := func(t *testing.T) Model {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "graph"})
 		m = press(t, m, "[") // m2, the second of three
-		if !strings.Contains(lines(m.Frame())[2], "2 / 3") {
-			t.Fatalf("bar %q", lines(m.Frame())[2])
+		if !strings.Contains(lines(m.Frame())[3], "2 / 3") {
+			t.Fatalf("bar %q", lines(m.Frame())[3])
 		}
 		return m
 	}
@@ -35,8 +35,8 @@ func TestReplayCursorSurvivesChanges(t *testing.T) {
 			m = step(t, m, adapter.FrameUpdate{Frame: adapter.Remove{Header: next(m), Entity: adapter.EntityMessage, Key: id}})
 			m.Frame()
 		}
-		if !strings.Contains(lines(m.Frame())[2], "1 / 1") {
-			t.Fatalf("bar %q: the cursor's message is gone, so Live", lines(m.Frame())[2])
+		if !strings.Contains(lines(m.Frame())[3], "1 / 1") {
+			t.Fatalf("bar %q: the cursor's message is gone, so Live", lines(m.Frame())[3])
 		}
 	})
 	t.Run("a replacement snapshot with no messages", func(t *testing.T) {
@@ -44,8 +44,8 @@ func TestReplayCursorSurvivesChanges(t *testing.T) {
 		snap := frames(t, "recorded-bare")[0]
 		m = step(t, m, adapter.FrameUpdate{Frame: snap})
 		m = step(t, m, mustTab("graph"))
-		if !strings.Contains(lines(m.Frame())[2], "0 / 0") {
-			t.Fatalf("bar %q", lines(m.Frame())[2])
+		if !strings.Contains(lines(m.Frame())[3], "0 / 0") {
+			t.Fatalf("bar %q", lines(m.Frame())[3])
 		}
 	})
 	t.Run("hide retired while the cursor is on a retired agent's message", func(t *testing.T) {
@@ -58,7 +58,7 @@ func TestReplayCursorSurvivesChanges(t *testing.T) {
 			t.Fatalf("cursor not on m3:\n%s", plain(m.Frame()))
 		}
 		m = press(t, m, "h")
-		if bar := lines(m.Frame())[2]; !strings.Contains(bar, "3 / 3") {
+		if bar := lines(m.Frame())[3]; !strings.Contains(bar, "3 / 3") {
 			t.Fatalf("bar %q: the cursor's message is hidden, so Live", bar)
 		}
 	})
@@ -125,7 +125,8 @@ func TestObligationAgeAdvances(t *testing.T) {
 	owes := func() string {
 		for _, l := range lines(m.Frame()) {
 			if strings.Contains(l, "claude-02 owes claude-01") {
-				return strings.Fields(l)[len(strings.Fields(l))-1]
+				fs := strings.Fields(strings.Trim(l, "│"))
+				return fs[len(fs)-1]
 			}
 		}
 		t.Fatalf("no obligation alert:\n%s", plain(m.Frame()))
@@ -164,16 +165,17 @@ func TestActiveTabAndSelectedRowColours(t *testing.T) {
 	m = press(t, m, "2")
 	ls := strings.Split(m.Frame(), "\n")
 	overlay, surface := sgrBg(m.pal.Overlay), sgrBg(m.pal.Surface)
-	if st := styleBefore(t, ls[1], " Members"); !strings.Contains(st, overlay) || !strings.HasPrefix(st, "\x1b[1;") {
+	if st := styleBefore(t, ls[2], " Members"); !strings.Contains(st, overlay) || !strings.HasPrefix(st, "\x1b[1;") {
 		t.Errorf("active tab style %q: want bold on the overlay", st)
 	}
-	if st := styleBefore(t, ls[1], " Overview"); !strings.Contains(st, surface) || strings.Contains(st, overlay) {
+	if st := styleBefore(t, ls[2], " Overview"); !strings.Contains(st, surface) || strings.Contains(st, overlay) {
 		t.Errorf("inactive tab style %q: want the surface", st)
 	}
-	for _, l := range ls[headerLines:] {
+	rightBorder := render(Span{Text: "│", Fg: m.pal.Faint}, m.pal.Bg)
+	for _, l := range ls[borderWidth+headerLines:] {
 		switch p := plain(l); {
 		case strings.Contains(p, "implementer(claude-02)"):
-			if !strings.Contains(l, overlay) || !strings.HasSuffix(l, overlay+"m \x1b[m") {
+			if !strings.Contains(l, overlay) || !strings.HasSuffix(l, overlay+"m \x1b[m"+rightBorder) {
 				t.Errorf("selected row is not on the overlay to its end: %q", l)
 			}
 		case strings.Contains(p, "orchestrator(claude-01)"), strings.Contains(p, "narrator(pi-04)"):

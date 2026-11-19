@@ -40,7 +40,7 @@ func (s Size) Bounds() rexctl.Bounds {
 	if s == Board {
 		return rexctl.Bounds{0.06, 0.06, 0.88, 0.88}
 	}
-	return rexctl.Bounds{0.64, 0.02, 0.35, 0.96}
+	return rexctl.Bounds{0.57, 0.02, 0.42, 0.96}
 }
 
 // Other is the size z switches to.

@@ -17,6 +17,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/est7/rex-amq-ui/internal/apc"
+	"github.com/est7/rex-amq-ui/internal/layer"
+	"github.com/est7/rex-amq-ui/internal/rexctl"
+	"github.com/est7/rex-amq-ui/internal/rexctl/rexctltest"
 	"github.com/est7/rex-amq-ui/internal/ui"
 )
 
@@ -258,8 +261,126 @@ func TestOpenExitCodes(t *testing.T) {
 		{"Rex unreachable", []string{"--tab", "mail"}, rex, 1},
 	} {
 		var out, errb bytes.Buffer
-		if got := runOpen(c.args, c.env, &out, &errb); got != c.want || out.Len() != 0 {
+		if got := runOpen(c.args, c.env, t.TempDir(), &out, &errb); got != c.want || out.Len() != 0 {
 			t.Errorf("%s: exit %d stdout %q, want exit %d and no stdout", c.name, got, out.String(), c.want)
 		}
 	}
+}
+
+func TestOpenUsesPersistedSizeHermetically(t *testing.T) {
+	openView := func(withPanel bool, bounds rexctl.Bounds) rexctl.View {
+		tiled := rexctl.Layer{LayerID: "layer:tiled", Kind: rexctl.LayerTiled, Bounds: rexctl.Bounds{0, 0, 1, 1},
+			Layout: &rexctl.LayoutNode{BlockID: "block:a", Rect: rexctl.Bounds{0, 0, 1, 1}},
+			Blocks: []rexctl.Block{{BlockID: "block:a"}}}
+		w := rexctl.Window{WindowID: "window:1", FocusedBlockID: "block:a", Layers: []rexctl.Layer{tiled}}
+		if withPanel {
+			w.Layers = append(w.Layers, rexctl.Layer{LayerID: "layer:p", Kind: rexctl.LayerFloating, Bounds: bounds,
+				State:  rexctl.LayerMinimized,
+				Layout: &rexctl.LayoutNode{BlockID: "block:p", Rect: rexctl.Bounds{0, 0, 1, 1}},
+				Blocks: []rexctl.Block{{BlockID: "block:p", Label: layer.Label, Owner: "client:app"}}})
+		}
+		return rexctl.View{Revision: 1, SessionID: "session:s", ActiveWindowID: "window:1", Windows: []rexctl.Window{w}}
+	}
+	handleBlockMethod := func(s *rexctltest.Server) {
+		s.Handle("block.method", func(r rexctltest.Request) (any, *rexctltest.Error) {
+			var p struct {
+				Method string `json:"method"`
+				Args   struct {
+					Data string `json:"data"`
+				} `json:"args"`
+			}
+			r.Decode(&p)
+			if p.Method == "write" {
+				return map[string]any{"bytes_written": len(p.Args.Data)}, nil
+			}
+			return map[string]any{"columns": 200, "rows": 50, "cell_width_px": 9, "cell_height_px": 22, "owner": "client:app"}, nil
+		})
+	}
+	envFor := func(url string) func(string) string {
+		kv := map[string]string{"REX_SERVER": url, "REX_SESSION": "session:s"}
+		return func(k string) string { return kv[k] }
+	}
+
+	t.Run("new layer uses persisted board size", func(t *testing.T) {
+		cache := t.TempDir()
+		if err := layer.SaveSize(cache, layer.Board); err != nil {
+			t.Fatal(err)
+		}
+		s := rexctltest.NewServer(t)
+		handleBlockMethod(s)
+		s.SetView(openView(false, rexctl.Bounds{}))
+		var out, errb bytes.Buffer
+		if code := runOpen(nil, envFor(s.URL), cache, &out, &errb); code != 0 {
+			t.Fatalf("exit %d stderr %q", code, errb.String())
+		}
+		r, ok := s.Last("session.new_layer")
+		if !ok {
+			t.Fatal("expected session.new_layer")
+		}
+		var p struct {
+			Bounds rexctl.Bounds `json:"bounds"`
+		}
+		r.Decode(&p)
+		if p.Bounds != layer.Board.Bounds() {
+			t.Fatalf("new_layer bounds %v, want Board %v", p.Bounds, layer.Board.Bounds())
+		}
+	})
+
+	t.Run("restored layer keeps current bounds even when state.json says board", func(t *testing.T) {
+		cache := t.TempDir()
+		if err := layer.SaveSize(cache, layer.Board); err != nil {
+			t.Fatal(err)
+		}
+		s := rexctltest.NewServer(t)
+		handleBlockMethod(s)
+		s.SetView(openView(true, layer.Drawer.Bounds()))
+		var out, errb bytes.Buffer
+		if code := runOpen(nil, envFor(s.URL), cache, &out, &errb); code != 0 {
+			t.Fatalf("exit %d stderr %q", code, errb.String())
+		}
+		if _, resized := s.Last("session.resize_layer"); resized {
+			t.Fatal("restoring without --board resized an already-open layer")
+		}
+	})
+
+	t.Run("explicit --board overrides persisted drawer size", func(t *testing.T) {
+		cache := t.TempDir()
+		if err := layer.SaveSize(cache, layer.Drawer); err != nil {
+			t.Fatal(err)
+		}
+		s := rexctltest.NewServer(t)
+		handleBlockMethod(s)
+		s.SetView(openView(false, rexctl.Bounds{}))
+		var out, errb bytes.Buffer
+		if code := runOpen([]string{"--board"}, envFor(s.URL), cache, &out, &errb); code != 0 {
+			t.Fatalf("exit %d stderr %q", code, errb.String())
+		}
+		r, _ := s.Last("session.new_layer")
+		var p struct {
+			Bounds rexctl.Bounds `json:"bounds"`
+		}
+		r.Decode(&p)
+		if p.Bounds != layer.Board.Bounds() {
+			t.Fatalf("new_layer bounds %v, want Board %v", p.Bounds, layer.Board.Bounds())
+		}
+	})
+
+	t.Run("bare panel startup resolves persisted size", func(t *testing.T) {
+		cache := t.TempDir()
+		if got := startPanelSize(false, cache); got != layer.Drawer {
+			t.Fatalf("missing state: got %v, want Drawer", got)
+		}
+		if err := layer.SaveSize(cache, layer.Board); err != nil {
+			t.Fatal(err)
+		}
+		if got := startPanelSize(false, cache); got != layer.Board {
+			t.Fatalf("persisted board: got %v, want Board", got)
+		}
+		if err := layer.SaveSize(cache, layer.Drawer); err != nil {
+			t.Fatal(err)
+		}
+		if got := startPanelSize(true, cache); got != layer.Board {
+			t.Fatalf("explicit --board: got %v, want Board", got)
+		}
+	})
 }

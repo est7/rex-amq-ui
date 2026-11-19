@@ -8,7 +8,7 @@ It reads the session from `rex-amq-adapter stream panel` and drives its own Rex 
 
 Two pieces:
 
-- **The panel**: the `rex-amq-ui` binary, a terminal UI that runs in a floating layer of the session's active tab. It sits on the right as a Drawer (35% of the width) or in the middle as a Board (88%). `z` switches between the two.
+- **The panel**: the `rex-amq-ui` binary, a terminal UI framed in an opaque rounded border that runs in a floating layer of the session's active tab. It sits on the right as a Drawer (42% of the width) or in the middle as a Board (88%). `z` switches between the two and saves your choice in `<UserCacheDir>/rex-amq-ui/state.json`.
 - **The Rex plugin**: `lua/rex-amq-ui/init.lua`, loaded from your Rex `init.lua`. It adds two actions, `amqui_toggle` and `amqui_waiting`, and binds them to keys.
 
 The panel has five tabs:
@@ -84,7 +84,7 @@ The plugin finds `rex-amq-ui` through your login shell (`$SHELL -l -c 'command -
 
 | Where | Key | What it does |
 |---|---|---|
-| Rex (plugin) | `Cmd+Shift+A` | `amqui_toggle`: show the panel in the current tab, or hide it when it has focus (see below) |
+| Rex (plugin) | `Cmd+Shift+A` | `amqui_toggle`: show the panel in the current tab, or hide it when it is visible there (see below) |
 | Rex (plugin) | `Cmd+Shift+U` | `amqui_waiting`: with one member waiting on you, focus its pane; with several, show the panel on Overview |
 | Panel | `Tab` / `Shift+Tab` | Next / previous tab |
 | Panel | `z` | Drawer ↔ Board |
@@ -103,8 +103,8 @@ What `Cmd+Shift+A` does depends on where the panel is:
 | The panel is | Toggle |
 |---|---|
 | not open in this session | opens it (`rex-amq-ui open`) in the current tab |
-| up and focused in this tab | pauses it and minimizes its layer; focus returns to your pane |
-| minimized, or up but not focused, in this tab | brings it back to normal, focuses it, and resumes it |
+| up in this tab (focused or not) | pauses it and minimizes its layer; focus stays on or returns to your pane |
+| minimized in this tab | brings it back to normal, focuses it, and resumes it |
 | in another tab of the session | moves it into this tab at the same size, then shows it |
 | left in a tab's layout by a move that broke off | floats it again in this tab, then shows it |
 

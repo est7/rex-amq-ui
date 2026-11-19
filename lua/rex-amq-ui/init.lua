@@ -5,7 +5,8 @@
 --
 -- Two actions:
 --   amqui_toggle   show the panel in the active tab (open it, restore it, or
---                  bring it over from another tab), or hide it when it has focus
+--                  bring it over from another tab), or hide it when it is visible
+--                  in the active tab
 --   amqui_waiting  go to whoever waits on you: nobody, one member's pane, or
 --                  the panel's alerts when several wait
 --
@@ -17,7 +18,7 @@ local M = {}
 local LABEL = "rex-amq-ui" -- the panel's block label; one panel per session
 local ESC = "\27"
 local EXEC_TIMEOUT = 20 -- seconds; `open` gives Rex 15, `waiting` the adapter 5
-local DRAWER, BOARD = { 0.64, 0.02, 0.35, 0.96 }, { 0.06, 0.06, 0.88, 0.88 } -- internal/layer's sizes
+local DRAWER, BOARD = { 0.57, 0.02, 0.42, 0.96 }, { 0.06, 0.06, 0.88, 0.88 } -- internal/layer's sizes
 
 local defaults = { toggle_key = "cmd+shift+a", waiting_key = "cmd+shift+u", bin = false, adapter_bin = false, board = false }
 local checks = {
@@ -254,8 +255,7 @@ function M.toggle(ctx)
   local view, err = view_of(session)
   if not view then return failed(err) end
   local panel = find_panel(view)
-  if panel and is_up(panel) and panel.window.window_id == view.active_window_id
-      and panel.window.focused_block_id == panel.block then
+  if panel and is_up(panel) and panel.window.window_id == view.active_window_id then
     return hide(session, panel)
   end
   return show(session, view, nil)
