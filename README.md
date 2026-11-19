@@ -19,7 +19,7 @@ The panel has five tabs:
 | **Members** | The lead first, then *Active*, *Standing by*, and a folded *Retired* group (`r`). Each row has its number (`1`–`9`), `▶` on the pane you last focused, a status dot, `role(handle)`, model and effort, its tab (Board only), its task, and unread mail. `Enter` focuses the member's pane and hides the panel. |
 | **Mail** | Every message in time order: `from → to`, age, state (`queued`, `drained`, `bounced`, `dead_lettered`), subject. `/` searches subjects, `p` shows only the selected member's mail, `f` follows new mail, `Space` expands the excerpt you are allowed to see. |
 | **Graph** | A picture of who mails whom, drawn as an image: members around an ellipse, mail as arrows between them. A replay bar above it (`[` `]` step through messages, `L` back to Live, `h` hides retired members) and a legend below. Click a member to select it; click it again to go to its pane. See [Graph](#graph). |
-| **Epics** | Only in a session with a live personal agent, where it is the first tab: every linked Epic with its lifecycle, pending hand-back, alert count, and the narrator's latest line. `Enter` switches Rex to that Epic's session. |
+| **Epics** | Only in a session with a live personal agent, where it is the first tab: every linked Epic with its lifecycle, pending hand-back, alert count, and the narrator's latest line. `Enter` drills down into that Epic in-place inside the panel (`← <hub> › <epic>`) with its live Overview, Members, Mail, and Graph tabs; `s` switches Rex to that Epic's session, and `o` opens its hand-back. |
 
 ## Requirements
 
@@ -90,12 +90,14 @@ The plugin finds `rex-amq-ui` through your login shell (`$SHELL -l -c 'command -
 | Panel | `z` | Drawer ↔ Board |
 | Panel | `j` `k`, `↑` `↓`, `g` `G` | Move; first / last |
 | Panel | `1`–`9` | Select that row in Members or Epics |
-| Panel | `Enter` | Focus the member's pane (or switch to the Epic's session) and hide the panel |
-| Overview | `o` | Open the full hand-back with `md-viewer` (or `$EDITOR`) |
+| Panel | `Enter` | Focus the member's pane (switching to the Epic's session when drilled down) or drill down into the selected Epic in-place on Epics |
+| Epics / Drilled Epic | `s` | Switch Rex to the selected (or drilled-down) Epic's session and hide the panel |
+| Overview / Epics | `o` | Open the full hand-back with `md-viewer` (or `$EDITOR`) |
 | Mail | `/`, `p`, `f`, `Space` | Search subjects, this member's mail only, follow, expand excerpt |
 | Graph | `[` `]`, `L`, `h` | Previous / next message, back to Live, hide retired |
 | Graph | click a member | Select it (Members follows); a second click focuses its pane and hides the panel |
-| Panel | `Esc` / `q` | Step back (clear a filter, close an excerpt); at the top, hide the panel |
+| Panel | `Esc` / `q` | Step back (clear a filter, close an excerpt, leave a drilled-down Epic); at the top, hide the panel |
+| Drilled Epic | `Backspace` | Step back or return to the Hub Epics list (does not hide at the root) |
 | Panel | `Q` | Quit the panel; Rex closes its layer, and the next toggle opens a new one |
 
 What `Cmd+Shift+A` does depends on where the panel is:
