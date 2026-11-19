@@ -125,7 +125,7 @@ func (s *screen) Write(p []byte) (int, error) {
 }
 
 func newGraphTab(g Graphics, clock Clock) *graphTab {
-	return &graphTab{out: &screen{w: g.Out}, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(30)}
+	return &graphTab{out: &screen{w: g.Out}, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(kitty.MaxFPS)}
 }
 
 // reset replaces the graph model for a newly subscribed session so nodes,

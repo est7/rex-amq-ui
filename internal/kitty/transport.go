@@ -132,7 +132,8 @@ func (t *Transport) Show(w io.Writer, img *image.RGBA, at Cell) error {
 }
 
 // Clear writes to w the command that deletes every image this terminal
-// shows (leaving the Graph tab, pausing, minimizing).
+// shows (leaving the Graph tab, pausing, minimizing, or falling back to TUI)
+// and proactively removes this process's stale frame files.
 func (t *Transport) Clear(w io.Writer) error {
 	const clearAll = "\x1b_Ga=d,d=A,q=2\x1b\\"
 	n, err := io.WriteString(w, clearAll)
@@ -143,7 +144,7 @@ func (t *Transport) Clear(w io.Writer) error {
 		return fmt.Errorf("kitty: write: %w", err)
 	}
 	t.shown, t.unsure = 0, false
-	return nil
+	return t.Cleanup()
 }
 
 // Cleanup removes this process's frame files the terminal has not read,
