@@ -50,11 +50,16 @@ func TestPanelOnATerminal(t *testing.T) {
 	cmd := exec.Command("script", "-q", "-t", "0", ts, os.Args[0], "-test.run=^TestHelperPanel$")
 	var env []string
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "REX_") {
+		if !strings.HasPrefix(kv, "REX_") && !strings.HasPrefix(kv, "HOME=") && !strings.HasPrefix(kv, "XDG_CACHE_HOME=") {
 			env = append(env, kv)
 		}
 	}
-	cmd.Env = append(env, "REX_AMQ_UI_HELPER=1", "REX_AMQ_UI_HELPER_ADAPTER="+fake)
+	cmd.Env = append(env,
+		"HOME="+filepath.Join(dir, "home"),
+		"XDG_CACHE_HOME="+filepath.Join(dir, "cache"),
+		"REX_AMQ_UI_HELPER=1",
+		"REX_AMQ_UI_HELPER_ADAPTER="+fake,
+	)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +87,7 @@ func TestPanelOnATerminal(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(ts)
 	got := screen()
-	for _, want := range []string{"auth-refresh", "not connected to Rex", "EXIT=0"} {
+	for _, want := range []string{"auth-refresh", "Drawer", "not connected to Rex", "EXIT=0"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q", want)
 		}

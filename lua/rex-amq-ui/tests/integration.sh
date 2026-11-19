@@ -27,7 +27,13 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-go -C "$root" build -o "$tmp/rex-amq-ui" ./cmd/rex-amq-ui
+mkdir -p "$tmp/home" "$tmp/cache"
+go -C "$root" build -o "$tmp/rex-amq-ui-bin" ./cmd/rex-amq-ui
+cat >"$tmp/rex-amq-ui" <<EOF
+#!/bin/sh
+HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" exec "$tmp/rex-amq-ui-bin" "\$@"
+EOF
+chmod +x "$tmp/rex-amq-ui"
 cat >"$tmp/rex-amq-adapter" <<EOF
 #!/bin/sh
 cat "$tmp/stream.ndjson"
