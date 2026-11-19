@@ -66,6 +66,36 @@ func TestPaintNoHoles(t *testing.T) {
 			t.Fatal("the CJK recipient is missing from the graph summary")
 		}
 	})
+	t.Run("drilled-down breadcrumb and views", func(t *testing.T) {
+		for _, sz := range sizes {
+			m := build(t, "edited-personal-cockpit", sz[0], sz[1], Deps{}, Options{})
+			m = press(t, m, "enter") // Connecting state with breadcrumb
+			if bad := holes(m.Frame(), sz[0], sz[1]); bad != nil {
+				t.Fatalf("drilled connecting %dx%d: %v\n%s", sz[0], sz[1], bad[0], plain(m.Frame()))
+			}
+			m = step(t, m, StreamUpdate{Gen: 1, Update: adapter.StatusUpdate{Status: adapter.Connected}})
+			for _, f := range frames(t, "edited-crew-attention") {
+				m = step(t, m, StreamUpdate{Gen: 1, Update: adapter.FrameUpdate{Frame: f}})
+			}
+			for _, tab := range allTabs[:4] {
+				m = step(t, m, apc.Command{Verb: apc.Tab, Tab: tab})
+				if bad := holes(m.Frame(), sz[0], sz[1]); bad != nil {
+					t.Fatalf("drilled/%s %dx%d: %v\n%s", tab, sz[0], sz[1], bad[0], plain(m.Frame()))
+				}
+			}
+		}
+		// Untrusted control bytes and CJK in breadcrumb labels.
+		m := build(t, "edited-personal-cockpit", dw, dh, Deps{}, Options{})
+		p := *m.st.Panel
+		p.SessionLabel = "hub\x1b[2J界面"
+		p.Cockpit = slices.Clone(p.Cockpit)
+		p.Cockpit[0].Name = "epic\t\x1b[31m🧑‍💻"
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: adapter.Header{Stream: m.st.Stream, Seq: m.st.Seq + 1}, Panel: p}})
+		m = press(t, m, "enter")
+		if bad := holes(m.Frame(), dw, dh); bad != nil {
+			t.Fatalf("drilled untrusted breadcrumb: %v", bad)
+		}
+	})
 }
 
 func lines(frame string) []string { return strings.Split(plain(frame), "\n") }
@@ -348,10 +378,10 @@ func TestKeys(t *testing.T) {
 			t.Fatalf("calls %v", rec.got())
 		}
 	})
-	t.Run("enter on an epic switches; refusal leaves a hint and the panel up", func(t *testing.T) {
+	t.Run("s on an epic switches; refusal leaves a hint and the panel up", func(t *testing.T) {
 		rec := &recorder{fail: map[string]error{"switch": layer.ErrRemoteControlOff}}
 		m := build(t, "edited-personal-cockpit", w, h, Deps{Layer: rec}, Options{})
-		m = press(t, m, "2", "enter")
+		m = press(t, m, "2", "s")
 		if !reflect.DeepEqual(rec.got(), []string{"switch session:t"}) || m.Paused() {
 			t.Fatalf("calls %v paused %v", rec.got(), m.Paused())
 		}
@@ -598,6 +628,193 @@ func TestHandBack(t *testing.T) {
 		m = press(t, m, "o")
 		if !contains(m.Frame(), "no hand-back yet") {
 			t.Fatalf("\n%s", plain(m.Frame()))
+		}
+	})
+	t.Run("o on Epics opens selected epic hand-back and hints when absent", func(t *testing.T) {
+		dir := t.TempDir()
+		rec := &recorder{}
+		var runs []ran
+		d := Deps{Layer: rec, CacheDir: dir,
+			LookPath: func(string) (string, error) { return "/opt/bin/md-viewer", nil },
+			Exec: func(_ context.Context, env []string, name string, args ...string) error {
+				runs = append(runs, ran{env, name, args})
+				return nil
+			}}
+		m := build(t, "edited-personal-cockpit", w, h, d, Options{})
+		m = press(t, m, "o")
+		path := filepath.Join(dir, "rex-amq-ui", "session_s-hand-back-1.md")
+		if len(runs) != 1 || runs[0].name != "/opt/bin/md-viewer" || !reflect.DeepEqual(runs[0].args, []string{"open", path}) ||
+			!reflect.DeepEqual(runs[0].env, []string{"REX_BLOCK=" + focusedPane}) {
+			t.Fatalf("runs %+v", runs)
+		}
+		b, err := os.ReadFile(path)
+		fi, _ := os.Stat(path)
+		if err != nil || string(b) != "run-goal: auth refresh\n\n## Blocked on me\n- release v2 tag" || fi.Mode().Perm() != 0o444 {
+			t.Fatalf("file %q %v %v", b, err, fi.Mode())
+		}
+		if !reflect.DeepEqual(rec.got(), []string{"minimize"}) || !m.Paused() {
+			t.Fatalf("calls %v paused %v", rec.got(), m.Paused())
+		}
+
+		// Row 2 (billing) has no hand-back yet.
+		m = step(t, m, apc.Command{Verb: apc.Resume})
+		m = press(t, m, "2", "o")
+		if len(runs) != 1 || m.Paused() || !contains(m.Frame(), "no hand-back yet") {
+			t.Fatalf("row 2 without hand-back: runs %d paused %v\n%s", len(runs), m.Paused(), plain(m.Frame()))
+		}
+	})
+}
+
+func TestDrillDown(t *testing.T) {
+	w, h := refSize(t, layer.Drawer)
+	type subCall struct {
+		session string
+		gen     uint64
+	}
+	t.Run("enter drills in-place, guards stale updates, and pops back on esc/backspace/q", func(t *testing.T) {
+		rec := &recorder{}
+		var subs []subCall
+		d := Deps{
+			Layer: rec,
+			Subscribe: func(session string, gen uint64) {
+				subs = append(subs, subCall{session, gen})
+			},
+		}
+		m := build(t, "edited-personal-cockpit", w, h, d, Options{Session: "session:p"})
+		// Select row 2 first to verify hub selection preservation across popBack,
+		// then back to row 1 (auth-refresh) and drill in.
+		m = press(t, m, "enter")
+		if !m.DrilledDown() || m.tab != TabOverview || m.Paused() || len(rec.got()) != 0 {
+			t.Fatalf("drilled=%v tab=%v paused=%v calls=%v", m.DrilledDown(), m.tab, m.Paused(), rec.got())
+		}
+		if want := []subCall{{"session:s", 1}}; !reflect.DeepEqual(subs, want) {
+			t.Fatalf("subs %+v, want %+v", subs, want)
+		}
+		if want := []Tab{TabOverview, TabMembers, TabMail, TabGraph}; !reflect.DeepEqual(m.tabs(), want) {
+			t.Fatalf("tabs %v, want %v", m.tabs(), want)
+		}
+		// Header shows breadcrumb and Connecting before Epic snapshot arrives.
+		hdr := lines(m.Frame())[1]
+		if !strings.Contains(hdr, "← me › auth-refresh") || !strings.Contains(hdr, "◌ Connecting") {
+			t.Fatalf("header before snapshot: %q", hdr)
+		}
+		foot := lines(m.Frame())[h-2]
+		if !strings.Contains(foot, "s switch") || !strings.Contains(foot, "esc back") {
+			t.Fatalf("drilled footer: %q", foot)
+		}
+		// Stale Hub updates (gen 0) are dropped and must not corrupt the Epic view.
+		hubSnap := frames(t, "edited-personal-cockpit")[0]
+		m = step(t, m, StreamUpdate{Gen: 0, Update: adapter.StatusUpdate{Status: adapter.Connected}})
+		m = step(t, m, StreamUpdate{Gen: 0, Update: adapter.FrameUpdate{Frame: hubSnap}})
+		if m.st.Ready() || m.status.Status != adapter.Connecting {
+			t.Fatalf("stale gen 0 corrupted drilled state: ready=%v status=%v", m.st.Ready(), m.status.Status)
+		}
+		// Current Epic updates (gen 1) populate the view and add crew to breadcrumb.
+		m = step(t, m, StreamUpdate{Gen: 1, Update: adapter.StatusUpdate{Status: adapter.Connected}})
+		for _, f := range frames(t, "edited-crew-attention") {
+			m = step(t, m, StreamUpdate{Gen: 1, Update: adapter.FrameUpdate{Frame: f}})
+		}
+		hdr = lines(m.Frame())[1]
+		if !strings.Contains(hdr, "← me › auth-refresh · crew:pair") || !strings.Contains(hdr, "● Live") {
+			t.Fatalf("header after snapshot: %q", hdr)
+		}
+		if !contains(m.Frame(), "SYSTEM ALERTS  5") {
+			t.Fatalf("epic overview missing alerts:\n%s", plain(m.Frame()))
+		}
+		// APC tab:epics is ignored while drilled down.
+		m = step(t, m, mustTab("epics"))
+		if m.tab == TabEpics {
+			t.Fatal("tab:epics must stay unavailable while drilled down")
+		}
+		// Tab-local stepBack unwinds before popping back to Hub.
+		m = step(t, m, mustTab("members"))
+		m = press(t, m, "r", "backspace")
+		if !m.DrilledDown() || m.retired {
+			t.Fatalf("backspace should close Retired before popping: drilled=%v retired=%v", m.DrilledDown(), m.retired)
+		}
+		// Enter on a drilled-down member calls JumpToSession, not same-session Jump.
+		m = press(t, m, "2", "enter")
+		if want := []string{"jump-session session:s block:claude-02"}; !reflect.DeepEqual(rec.got(), want) {
+			t.Fatalf("drilled member enter calls %v, want %v", rec.got(), want)
+		}
+		m = step(t, m, apc.Command{Verb: apc.Resume})
+		// s inside drilled-down Epic switches to the Epic session.
+		m = press(t, m, "s")
+		if got := rec.got(); got[len(got)-1] != "switch session:s" {
+			t.Fatalf("s inside drilled-down epic: calls %v", got)
+		}
+		m = step(t, m, apc.Command{Verb: apc.Resume})
+		// Typing 's' in Mail search does not trigger session switch.
+		beforeCalls := len(rec.got())
+		m = step(t, m, mustTab("mail"))
+		m = press(t, m, "/", "s", "enter")
+		if len(rec.got()) != beforeCalls || m.mail.query != "s" {
+			t.Fatalf("typing s in mail search switched or failed: calls %v query %q", rec.got(), m.mail.query)
+		}
+		// First esc clears Mail search query, stays drilled down.
+		m = press(t, m, "esc")
+		if !m.DrilledDown() || m.mail.query != "" {
+			t.Fatalf("esc should clear search first: drilled=%v query=%q", m.DrilledDown(), m.mail.query)
+		}
+		// Second esc pops back to Hub Epics immediately with saved state and resubscribes.
+		m = press(t, m, "esc")
+		if m.DrilledDown() || m.tab != TabEpics || !m.st.Ready() || m.status.Status != adapter.Connected {
+			t.Fatalf("after esc pop: drilled=%v tab=%v ready=%v status=%v", m.DrilledDown(), m.tab, m.st.Ready(), m.status.Status)
+		}
+		if want := []subCall{{"session:s", 1}, {"session:p", 2}}; !reflect.DeepEqual(subs, want) {
+			t.Fatalf("subs %+v, want %+v", subs, want)
+		}
+		// Stale Epic update (gen 1) is dropped after returning to Hub.
+		m = step(t, m, StreamUpdate{Gen: 1, Update: adapter.FrameUpdate{Frame: frames(t, "edited-crew-attention")[0]}})
+		if !m.personal() || len(m.epics()) != 2 {
+			t.Fatalf("stale epic update corrupted restored hub state: personal=%v epics=%d", m.personal(), len(m.epics()))
+		}
+		// Backspace at root does NOT minimize the panel.
+		beforeCalls = len(rec.got())
+		m = press(t, m, "backspace")
+		if len(rec.got()) != beforeCalls || m.Paused() {
+			t.Fatalf("backspace at root minimized panel: calls %v paused=%v", rec.got(), m.Paused())
+		}
+		// Verify Backspace and q also pop back while preserving row 2 selection.
+		for _, popKey := range []string{"backspace", "q"} {
+			m = press(t, m, "2", "enter")
+			if !m.DrilledDown() || !strings.Contains(lines(m.Frame())[1], "← me › billing") {
+				t.Fatalf("drill row 2 (%s): drilled=%v hdr=%q", popKey, m.DrilledDown(), lines(m.Frame())[1])
+			}
+			m = press(t, m, popKey)
+			if m.DrilledDown() || m.tab != TabEpics || m.sel[TabEpics] != 1 {
+				t.Fatalf("pop on %s: drilled=%v tab=%v sel=%d", popKey, m.DrilledDown(), m.tab, m.sel[TabEpics])
+			}
+		}
+	})
+
+	t.Run("hub session fallback from Options.Session and breadcrumb label fallbacks", func(t *testing.T) {
+		var subs []subCall
+		d := Deps{Subscribe: func(session string, gen uint64) { subs = append(subs, subCall{session, gen}) }}
+		fs := frames(t, "edited-personal-cockpit")
+		snap := fs[0].(adapter.Snapshot)
+		snap.Scope.SessionID = "" // empty scope session: must fall back to Options.Session
+		p := *snap.Panel
+		p.SessionLabel = "" // empty hub label: must fall back to "hub"
+		p.Cockpit = slices.Clone(p.Cockpit)
+		p.Cockpit[0].Name = "" // empty epic name: falls back to stream SessionLabel once arrived
+		snap.Panel = &p
+
+		m := New(d, Options{Session: "session:hub-opt"})
+		m = step(t, m, tea.WindowSizeMsg{Width: w, Height: h})
+		m = step(t, m, adapter.StatusUpdate{Status: adapter.Connected})
+		m = step(t, m, adapter.FrameUpdate{Frame: snap})
+		m = press(t, m, "enter")
+		if hdr := lines(m.Frame())[1]; !strings.Contains(hdr, "← hub › session:s") {
+			t.Fatalf("before epic snapshot header: %q", hdr)
+		}
+		m = step(t, m, StreamUpdate{Gen: 1, Update: adapter.FrameUpdate{Frame: frames(t, "edited-crew-attention")[0]}})
+		if hdr := lines(m.Frame())[1]; !strings.Contains(hdr, "← hub › auth-refresh") {
+			t.Fatalf("after epic snapshot header: %q", hdr)
+		}
+		m = press(t, m, "esc")
+		if want := []subCall{{"session:s", 1}, {"session:hub-opt", 2}}; !reflect.DeepEqual(subs, want) {
+			t.Fatalf("subs %+v, want %+v", subs, want)
 		}
 	})
 }

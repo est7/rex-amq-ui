@@ -70,17 +70,33 @@ func (m Model) render() string {
 
 func (m Model) header(c *canvas) {
 	p := m.pal
-	title := "rex-amq-ui"
 	var crew []Span
-	if m.st.Panel != nil {
-		if m.st.Panel.SessionLabel != "" {
+	if m.st.Panel != nil && m.st.Panel.Crew != nil && m.st.Panel.Crew.Crew != "" {
+		crew = []Span{{Text: " · crew:" + m.st.Panel.Crew.Crew, Fg: p.Muted}}
+	}
+	var left []Span
+	if m.DrilledDown() {
+		epicName := m.drill.epic.Name
+		if epicName == "" && m.st.Panel != nil {
+			epicName = m.st.Panel.SessionLabel
+		}
+		if epicName == "" {
+			epicName = m.drill.epic.SessionID
+		}
+		left = []Span{
+			{Text: " ← ", Fg: p.Aqua, Bold: true},
+			{Text: m.drill.hubLabel, Fg: p.Muted},
+			{Text: " › ", Fg: p.Faint},
+			{Text: epicName, Fg: p.Fg, Bold: true},
+		}
+		left = append(left, crew...)
+	} else {
+		title := "rex-amq-ui"
+		if m.st.Panel != nil && m.st.Panel.SessionLabel != "" {
 			title = m.st.Panel.SessionLabel
 		}
-		if m.st.Panel.Crew != nil && m.st.Panel.Crew.Crew != "" {
-			crew = []Span{{Text: " · crew:" + m.st.Panel.Crew.Crew, Fg: p.Muted}}
-		}
+		left = append([]Span{{Text: " " + title, Fg: p.Fg, Bold: true}}, crew...)
 	}
-	left := append([]Span{{Text: " " + title, Fg: p.Fg, Bold: true}}, crew...)
 	var live Span
 	switch {
 	case m.st.Ready() && m.status.Status == adapter.Connected:
@@ -153,7 +169,7 @@ func (m Model) footer(c *canvas) {
 	var keys []string
 	switch m.tab {
 	case TabEpics:
-		keys = []string{"↵ switch", "1-9 pick"}
+		keys = []string{"↵ drill", "s switch", "o hand-back", "1-9 pick"}
 	case TabOverview:
 		keys = []string{"↵ focus", "o hand-back"}
 	case TabMembers:
@@ -163,7 +179,11 @@ func (m Model) footer(c *canvas) {
 	case TabGraph:
 		keys = []string{"[ ] replay", "L live", "h hide retired"}
 	}
-	keys = append(keys, "⇥ tabs", "z zoom", "q hide", "Q quit")
+	if m.DrilledDown() {
+		keys = append(keys, "s switch", "esc back", "⇥ tabs", "z zoom", "Q quit")
+	} else {
+		keys = append(keys, "⇥ tabs", "z zoom", "q hide", "Q quit")
+	}
 	// Hints that do not fit whole are left out rather than cut.
 	spans, used := []Span{{Text: " "}}, 1
 	for i, k := range keys {

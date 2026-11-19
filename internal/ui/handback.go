@@ -11,25 +11,44 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/est7/rex-amq-ui/internal/adapter"
 )
 
 var errNoViewer = errors.New("install md-viewer or set $EDITOR to read it")
 
-// openHandBack writes the hand-back to a read-only Markdown file in the
-// cache and shows it beside the pane the human was in: with md-viewer, or
-// failing that in $EDITOR split in beside that pane. The panel minimizes
-// once it shows.
+// openHandBack writes the current session's hand-back to a read-only
+// Markdown file in the cache and shows it beside the pane the human was
+// in: with md-viewer, or failing that in $EDITOR split in beside that
+// pane. The panel minimizes once it shows.
 func (m Model) openHandBack() tea.Cmd {
-	if m.st.Panel == nil || m.st.Panel.View == nil || m.st.Panel.View.HandBack == nil {
+	var hb *adapter.HandBack
+	if m.st.Panel != nil && m.st.Panel.View != nil {
+		hb = m.st.Panel.View.HandBack
+	}
+	return m.openHandBackFor(m.currentSession(), hb)
+}
+
+// openEpicHandBack opens the selected Epic's hand-back directly from the
+// Epics tab.
+func (m Model) openEpicHandBack() tea.Cmd {
+	e, ok := m.selectedEpic()
+	if !ok {
+		return m.openHandBackFor("", nil)
+	}
+	return m.openHandBackFor(e.SessionID, e.HandBack)
+}
+
+func (m Model) openHandBackFor(session string, hb *adapter.HandBack) tea.Cmd {
+	if hb == nil {
 		return func() tea.Msg { return actionDone{what: "open hand-back", err: errors.New("no hand-back yet")} }
 	}
-	hb := *m.st.Panel.View.HandBack
-	session := m.st.Scope.SessionID
+	copyHB := *hb
 	d, anchor, shown := m.deps, m.lay.Focused, m.shown
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		path, err := writeHandBack(d.CacheDir, session, hb.Seq, hb.Body)
+		path, err := writeHandBack(d.CacheDir, session, copyHB.Seq, copyHB.Body)
 		if err != nil {
 			return actionDone{what: "open hand-back", err: err}
 		}

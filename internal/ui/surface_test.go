@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/est7/rex-amq-ui/internal/adapter"
 	"github.com/est7/rex-amq-ui/internal/layer"
 	"github.com/est7/rex-amq-ui/internal/rexctl"
 	"github.com/est7/rex-amq-ui/internal/rexctl/rexctltest"
@@ -188,7 +189,7 @@ func TestSurface(t *testing.T) {
 		w, h := refSize(t, layer.Drawer)
 		m := build(t, "edited-personal-cockpit", w, h, Deps{Layer: p}, Options{})
 		from := len(s.Requests())
-		m = press(t, m, "enter")
+		m = press(t, m, "s")
 		if got := calls(s, from); !reflect.DeepEqual(got, []string{"client.list", "client.perform"}) {
 			t.Fatalf("calls %v", got)
 		}
@@ -204,6 +205,41 @@ func TestSurface(t *testing.T) {
 		if perf.Action != "session.select" || perf.Args.SessionID != "session:s" || m.Paused() ||
 			!strings.Contains(foot, "enable Rex Settings > Rex Server > Remote Control") {
 			t.Fatalf("perform %+v paused %v footer %q", perf, m.Paused(), foot)
+		}
+	})
+
+	t.Run("drilled-down enter on a member switches to the epic session and focuses its block", func(t *testing.T) {
+		const hubSess = "session:p"
+		s := rexctltest.NewServer(t)
+		drawer := layer.Drawer.Bounds()
+		hubView := surfView(2, &drawer)
+		hubView.SessionID = hubSess
+		s.SetView(hubView)
+		p, err := layer.Connect(ctx, s.URL, hubSess, surfPanel, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, h := refSize(t, layer.Drawer)
+		m := build(t, "edited-personal-cockpit", w, h, Deps{Layer: p}, Options{Session: hubSess})
+		m = press(t, m, "enter")
+		for _, f := range frames(t, "edited-crew-attention") {
+			m = step(t, m, StreamUpdate{Gen: 1, Update: adapter.FrameUpdate{Frame: f}})
+		}
+		m = step(t, m, mustTab("members"))
+		from := len(s.Requests())
+		m = press(t, m, "2", "enter")
+		want := []string{"client.list", "client.perform", "session.attach", "session.focus_block", "session.set_layer_state"}
+		if got := calls(s, from); !reflect.DeepEqual(got, want) {
+			t.Fatalf("calls %v, want %v", got, want)
+		}
+		r, _ := s.Last("session.focus_block")
+		var fb struct {
+			SessionID string `json:"session_id"`
+			BlockID   string `json:"block_id"`
+		}
+		r.Decode(&fb)
+		if fb.SessionID != "session:s" || fb.BlockID != "block:claude-02" || !m.Paused() {
+			t.Fatalf("focus_block %+v paused %v", fb, m.Paused())
 		}
 	})
 

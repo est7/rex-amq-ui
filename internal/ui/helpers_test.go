@@ -184,6 +184,9 @@ func (r *recorder) Resize(_ context.Context, s layer.Size) error {
 }
 func (r *recorder) Minimize(context.Context) error             { return r.note("minimize") }
 func (r *recorder) Jump(_ context.Context, b string) error     { return r.note("jump " + b) }
+func (r *recorder) JumpToSession(_ context.Context, s, b string) error {
+	return r.note("jump-session " + s + " " + b)
+}
 func (r *recorder) SwitchTo(_ context.Context, s string) error { return r.note("switch " + s) }
 func (r *recorder) OpenBeside(_ context.Context, anchor, label string, argv []string) error {
 	return r.note(fmt.Sprintf("beside %s %s %v", anchor, label, argv))
