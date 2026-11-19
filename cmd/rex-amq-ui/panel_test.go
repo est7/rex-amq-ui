@@ -145,6 +145,138 @@ func TestPanelProgram(t *testing.T) {
 	t.Logf("line erases the renderer used, all under a set background: %v", seen)
 }
 
+// TestPanelProgramDrillDownStreamSwitch verifies live Hub -> Epic drill-down
+// stream switching (--session <epic>) and Esc / Backspace return (--session
+// <hub>) end to end through runPanel, apc.Reader, ui.Model, and streamManager.
+func TestPanelProgramDrillDownStreamSwitch(t *testing.T) {
+	dir := t.TempDir()
+	hubFixture, err := filepath.Abs(filepath.Join("..", "..", "testdata", "panel", "edited-personal-cockpit.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	epicFixture, err := filepath.Abs(filepath.Join("..", "..", "testdata", "panel", "edited-crew-attention.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callsFile := filepath.Join(dir, "calls.log")
+	script := filepath.Join(dir, "rex-amq-adapter")
+	body := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> '%s'
+sess=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session" ]; then sess="$a"; fi
+  prev="$a"
+done
+case "$sess" in
+  session:p) cat '%s' ;;
+  session:s) cat '%s' ;;
+  *) exit 1 ;;
+esac
+exec sleep 60
+`, callsFile, hubFixture, epicFixture)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inW.Close()
+	out := &syncBuffer{}
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runPanel(context.Background(), panelConfig{
+			Session:    "session:p",
+			AdapterBin: script,
+			CacheDir:   filepath.Join(dir, "cache"),
+			In:         inR,
+			Out:        out,
+			Width:      90,
+			Height:     48,
+			Options:    ui.Options{},
+		})
+	}()
+
+	readCalls := func() []string {
+		b, err := os.ReadFile(callsFile)
+		if err != nil {
+			return nil
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return nil
+		}
+		return strings.Split(s, "\n")
+	}
+	showsSince := func(offset int, s string) func() bool {
+		return func() bool {
+			raw, _ := out.snapshot()
+			if offset > len(raw) {
+				return false
+			}
+			return strings.Contains(ansi.Strip(raw[offset:]), s)
+		}
+	}
+
+	// 1. Initial Hub stream starts on --session session:p and shows Epics.
+	waitFor(t, "initial Hub Epics view", showsSince(0, "Epics 2"))
+	waitFor(t, "initial Hub stream call", func() bool { return len(readCalls()) >= 1 })
+
+	// 2. Enter drills down in-place into auth-refresh (session:s).
+	_, beforeDrill := out.snapshot()
+	inW.WriteString("\r")
+	waitFor(t, "Epic stream subscription", func() bool { return len(readCalls()) >= 2 })
+	waitFor(t, "drilled breadcrumb", showsSince(beforeDrill, "← me › auth-refresh"))
+	waitFor(t, "drilled Epic Overview alerts", showsSince(beforeDrill, "SYSTEM ALERTS  5"))
+
+	// 3. Tab into Epic Members tab verifies live Epic data.
+	_, beforeTab := out.snapshot()
+	inW.WriteString("\t")
+	waitFor(t, "drilled Epic Members tab", showsSince(beforeTab, "implementer(claude-02)"))
+
+	// 4. Esc returns cleanly to Hub Epics and resubscribes --session session:p.
+	_, beforeEsc := out.snapshot()
+	inW.WriteString("\x1b")
+	waitFor(t, "Hub stream resubscription after Esc", func() bool { return len(readCalls()) >= 3 })
+	waitFor(t, "Hub Epics restored after Esc", showsSince(beforeEsc, "Epics 2"))
+
+	// 5. Drill in again and verify Backspace also returns to Hub Epics.
+	_, beforeDrill2 := out.snapshot()
+	inW.WriteString("\r")
+	waitFor(t, "second Epic stream subscription", func() bool { return len(readCalls()) >= 4 })
+	waitFor(t, "second drilled breadcrumb", showsSince(beforeDrill2, "← me › auth-refresh"))
+
+	_, beforeBS := out.snapshot()
+	inW.WriteString("\x7f")
+	waitFor(t, "Hub stream resubscription after Backspace", func() bool { return len(readCalls()) >= 5 })
+	waitFor(t, "Hub Epics restored after Backspace", showsSince(beforeBS, "Epics 2"))
+
+	// 6. Quit cleanly.
+	inW.WriteString("Q")
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("panel ended with %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Q did not quit the panel")
+	}
+
+	got := readCalls()
+	want := []string{
+		"stream panel --session session:p",
+		"stream panel --session session:s",
+		"stream panel --session session:p",
+		"stream panel --session session:s",
+		"stream panel --session session:p",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("adapter stream calls:\n got: %v\nwant: %v", got, want)
+	}
+}
+
 // sgrBackground applies an SGR's parameters to bg (whether a background
 // colour is set), refusing what it does not model: reverse video, and
 // extended colours whose arguments are not 5;n or 2;r;g;b in 0..255.
