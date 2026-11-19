@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -159,16 +160,34 @@ func TestViewMapping(t *testing.T) {
 			t.Fatalf("blocked line %q, other line %q", blocked, plainLine)
 		}
 	})
-	t.Run("a long hand-back pulls Blocked on me up", func(t *testing.T) {
+	t.Run("a long hand-back renders uncapped with Blocked on me highlighted", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{})
 		p := *m.st.Panel
 		v := *p.View
-		v.HandBack = &adapter.HandBack{By: "claude-01", Seq: 2, At: m.now(), Body: strings.Repeat("line\n", 12) + "## Blocked on me\n- sign the release"}
+		var body strings.Builder
+		for i := 1; i <= 12; i++ {
+			fmt.Fprintf(&body, "item %02d\n", i)
+		}
+		body.WriteString("\n## Blocked on me\n- sign the release")
+		v.HandBack = &adapter.HandBack{By: "claude-01", Seq: 2, At: m.now(), Body: body.String()}
 		p.View = &v
 		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: adapter.Header{Stream: m.st.Stream, Seq: m.st.Seq + 1}, Panel: p}})
 		f := m.Frame()
-		if !contains(f, "… ## Blocked on me") || !contains(f, "- sign the release") || !contains(f, "more lines") {
+		if !contains(f, "item 01") || !contains(f, "item 12") || !contains(f, "## Blocked on me") || !contains(f, "- sign the release") || contains(f, "more lines") {
 			t.Fatalf("\n%s", plain(f))
+		}
+		yellow := sgrFg(m.pal.Yellow)
+		var blockedLine, signLine string
+		for _, l := range strings.Split(f, "\n") {
+			switch {
+			case strings.Contains(plain(l), "## Blocked on me"):
+				blockedLine = l
+			case strings.Contains(plain(l), "- sign the release"):
+				signLine = l
+			}
+		}
+		if !strings.Contains(blockedLine, yellow) || !strings.Contains(signLine, yellow) {
+			t.Fatalf("expected yellow Blocked on me lines: header=%q item=%q", blockedLine, signLine)
 		}
 	})
 	t.Run("no-view session shows the quiet narrator line", func(t *testing.T) {
@@ -225,19 +244,51 @@ func TestViewMapping(t *testing.T) {
 			t.Fatalf("m2 has no excerpt to open:\n%s", plain(m.Frame()))
 		}
 	})
-	t.Run("mail search and member filter", func(t *testing.T) {
+	t.Run("mail search and participant filter", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		// Search matches Subject, From, To, and authorized excerpt Body (case-insensitive).
 		m = press(t, m, "/", "S", "C", "O", "enter")
 		if f := m.Frame(); !contains(f, "question about scope") || contains(f, "build it") {
-			t.Fatalf("search:\n%s", plain(f))
+			t.Fatalf("search subject:\n%s", plain(f))
 		}
 		m = press(t, m, "esc") // clears the search
+		m = press(t, m, "/", "C", "O", "D", "E", "X", "enter")
+		if f := m.Frame(); !contains(f, "review s1") || contains(f, "build it") {
+			t.Fatalf("search To:\n%s", plain(f))
+		}
+		m = press(t, m, "esc")
+		m = press(t, m, "/", "T", "O", "K", "E", "N", "enter")
+		if f := m.Frame(); !contains(f, "build it") || contains(f, "review s1") {
+			t.Fatalf("search excerpt Body:\n%s", plain(f))
+		}
+		m = press(t, m, "esc")
+
+		// p cycles the currently selected message's participants: From -> primary To -> clear,
+		// regardless of TabMembers's cursor. Move TabMembers cursor to pi-04 (row 3) to prove independence.
 		m = step(t, m, apc.Command{Verb: apc.Tab, Tab: "members"})
-		m = press(t, m, "1")
+		m = press(t, m, "3")
 		m = step(t, m, apc.Command{Verb: apc.Tab, Tab: "mail"})
-		m = press(t, m, "p")
+		// Select m3 (claude-01 -> codex-03, "review s1") explicitly and press p.
+		m = press(t, m, "G", "p")
 		if f := m.Frame(); !contains(f, "from/to claude-01") || !contains(f, "review s1") || !contains(f, "build it") {
-			t.Fatalf("filter by claude-01:\n%s", plain(f))
+			t.Fatalf("1st p (From=claude-01):\n%s", plain(f))
+		}
+		if cur, ok := m.selectedMail(); !ok || cur.ID != "2026-11-16T09-04-00.000Z_m3" {
+			t.Fatalf("selection not anchored on m3 after 1st p: %+v", cur)
+		}
+		m = press(t, m, "p")
+		if f := m.Frame(); !contains(f, "from/to codex-03") || !contains(f, "review s1") || contains(f, "build it") {
+			t.Fatalf("2nd p (To=codex-03):\n%s", plain(f))
+		}
+		if cur, ok := m.selectedMail(); !ok || cur.ID != "2026-11-16T09-04-00.000Z_m3" {
+			t.Fatalf("selection not anchored on m3 after 2nd p: %+v", cur)
+		}
+		m = press(t, m, "p")
+		if f := m.Frame(); contains(f, "from/to ") || !contains(f, "build it") || !contains(f, "review s1") {
+			t.Fatalf("3rd p (clear):\n%s", plain(f))
+		}
+		if cur, ok := m.selectedMail(); !ok || cur.ID != "2026-11-16T09-04-00.000Z_m3" {
+			t.Fatalf("selection not anchored on m3 after 3rd p: %+v", cur)
 		}
 	})
 	t.Run("epics: first and default in a personal session", func(t *testing.T) {
@@ -815,6 +866,450 @@ func TestDrillDown(t *testing.T) {
 		m = press(t, m, "esc")
 		if want := []subCall{{"session:s", 1}, {"session:hub-opt", 2}}; !reflect.DeepEqual(subs, want) {
 			t.Fatalf("subs %+v, want %+v", subs, want)
+		}
+	})
+}
+
+func TestUncappedWrappingAndLineScrolling(t *testing.T) {
+	t.Run("wrap preserves paragraphs, blank lines, and lists", func(t *testing.T) {
+		got := wrap("# Title\n\n- first bullet item\n- second bullet\r\n\r\nfinal paragraph\n", 40)
+		want := []string{"# Title", "", "- first bullet item", "- second bullet", "", "final paragraph"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("wrap = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("uncapped mail excerpt shows ellipsis only when adapter truncated it", func(t *testing.T) {
+		w, h := refSize(t, layer.Board)
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		p := *m.st.Panel
+		v := *p.View
+		var body strings.Builder
+		for i := 1; i <= 10; i++ {
+			fmt.Fprintf(&body, "paragraph %02d\n", i)
+		}
+		v.ControlPlane = []adapter.ViewMessage{
+			{Ref: "2026-11-16T09-00-00.000Z_m1", Body: body.String(), Truncated: false},
+			{Ref: "2026-11-16T09-02-00.000Z_m2", Body: "cut short body", Truncated: true},
+		}
+		p.View = &v
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: next(m), Panel: p}})
+
+		// Expand m1 (10 lines, Truncated=false): all 10 lines shown, NO trailing ellipsis line.
+		m = press(t, m, "g", "space")
+		f := m.Frame()
+		if !contains(f, "paragraph 01") || !contains(f, "paragraph 10") {
+			t.Fatalf("m1 excerpt truncated unexpectedly:\n%s", plain(f))
+		}
+		for _, l := range lines(f) {
+			if strings.TrimSpace(strings.Trim(l, "│")) == "…" {
+				t.Fatalf("unexpected ellipsis for non-truncated excerpt:\n%s", plain(f))
+			}
+		}
+
+		// Expand m2 (Truncated=true): trailing ellipsis line IS shown.
+		m = press(t, m, "j", "space")
+		foundEllipsis := false
+		for _, l := range lines(m.Frame()) {
+			if strings.TrimSpace(strings.Trim(l, "│")) == "…" {
+				foundEllipsis = true
+			}
+		}
+		if !foundEllipsis {
+			t.Fatalf("expected ellipsis for adapter-truncated excerpt:\n%s", plain(m.Frame()))
+		}
+	})
+
+	t.Run("tall expanded mail scrolls line-by-line before advancing row", func(t *testing.T) {
+		// 80x12 => innerH=10, contentHeight=7, mail list viewport=6 lines.
+		const w, h = 80, 12
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		p := *m.st.Panel
+		v := *p.View
+		var body strings.Builder
+		for i := 1; i <= 10; i++ {
+			fmt.Fprintf(&body, "mail-line-%02d\n", i)
+		}
+		v.ControlPlane = []adapter.ViewMessage{
+			{Ref: "2026-11-16T09-00-00.000Z_m1", Body: body.String(), Truncated: false},
+		}
+		p.View = &v
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: next(m), Panel: p}})
+
+		// Row 0 expanded: 1 header + 10 body lines = 11 lines; viewport = 6 => maxOff = 5.
+		m = press(t, m, "g", "space")
+		if m.sel[TabMail] != 0 || m.scroll[TabMail] != 0 {
+			t.Fatalf("initial expand: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		if !contains(m.Frame(), "build it") || !contains(m.Frame(), "mail-line-05") || contains(m.Frame(), "mail-line-06") {
+			t.Fatalf("top of tall mail:\n%s", plain(m.Frame()))
+		}
+
+		// Step down 5 lines within row 0.
+		for stepIdx := 1; stepIdx <= 5; stepIdx++ {
+			m = press(t, m, "j")
+			if m.sel[TabMail] != 0 || m.scroll[TabMail] != stepIdx {
+				t.Fatalf("step %d: sel=%d scroll=%d, want sel=0 scroll=%d", stepIdx, m.sel[TabMail], m.scroll[TabMail], stepIdx)
+			}
+			if bad := holes(m.Frame(), w, h); bad != nil {
+				t.Fatalf("step %d holes: %v", stepIdx, bad)
+			}
+		}
+		if !contains(m.Frame(), "mail-line-10") || contains(m.Frame(), "build it") {
+			t.Fatalf("bottom of tall mail:\n%s", plain(m.Frame()))
+		}
+
+		// Next j advances to row 1 at scroll 0.
+		m = press(t, m, "j")
+		if m.sel[TabMail] != 1 || m.scroll[TabMail] != 0 {
+			t.Fatalf("advance to row 1: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		// Short row 1 -> row 2 takes a single j.
+		m = press(t, m, "j")
+		if m.sel[TabMail] != 2 || m.scroll[TabMail] != 0 {
+			t.Fatalf("short row advance: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		// k back to row 1 (short), then k into row 0 lands at bottom of row 0 (scroll=5).
+		m = press(t, m, "k")
+		if m.sel[TabMail] != 1 || m.scroll[TabMail] != 0 {
+			t.Fatalf("back to row 1: sel=%d scroll=%d", m.sel[TabMail], m.scroll[TabMail])
+		}
+		m = press(t, m, "k")
+		if m.sel[TabMail] != 0 || m.scroll[TabMail] != 5 || !contains(m.Frame(), "mail-line-10") {
+			t.Fatalf("enter tall row 0 from below: sel=%d scroll=%d\n%s", m.sel[TabMail], m.scroll[TabMail], plain(m.Frame()))
+		}
+		// k steps up line-by-line back to top of row 0.
+		for stepIdx := 4; stepIdx >= 0; stepIdx-- {
+			m = press(t, m, "k")
+			if m.sel[TabMail] != 0 || m.scroll[TabMail] != stepIdx {
+				t.Fatalf("up step %d: sel=%d scroll=%d", stepIdx, m.sel[TabMail], m.scroll[TabMail])
+			}
+		}
+		if !contains(m.Frame(), "build it") {
+			t.Fatalf("back at top of row 0:\n%s", plain(m.Frame()))
+		}
+	})
+
+	t.Run("tall overview narrative and hand-back scroll line-by-line with j/k/g/G", func(t *testing.T) {
+		// 80x12 => innerH=10, contentHeight=7.
+		const w, h = 80, 12
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "overview"})
+		p := *m.st.Panel
+		v := *p.View
+		var nar, hb strings.Builder
+		for i := 1; i <= 10; i++ {
+			fmt.Fprintf(&nar, "nar-line-%02d\n", i)
+			fmt.Fprintf(&hb, "hb-line-%02d\n", i)
+		}
+		v.Narrative = &adapter.ViewNarrative{Text: nar.String(), At: m.now()}
+		v.HandBack = &adapter.HandBack{By: "claude-01", Seq: 2, At: m.now(), Body: hb.String()}
+		p.View = &v
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.PanelUpsert{Header: next(m), Panel: p}})
+
+		// Move past the 5 alerts to the narrative row (row 5).
+		for range 5 {
+			m = press(t, m, "j")
+		}
+		if m.sel[TabOverview] != 5 || !contains(m.Frame(), "nar-line-01") || contains(m.Frame(), "nar-line-10") {
+			t.Fatalf("top of narrative: sel=%d\n%s", m.sel[TabOverview], plain(m.Frame()))
+		}
+		// Scroll down within narrative until nar-line-10 is visible, without leaving row 5.
+		for !contains(m.Frame(), "nar-line-10") {
+			m = press(t, m, "j")
+			if m.sel[TabOverview] != 5 {
+				t.Fatalf("left narrative row 5 before showing nar-line-10: sel=%d", m.sel[TabOverview])
+			}
+		}
+
+		// G jumps to the last row (hand-back) with its bottom line visible.
+		m = press(t, m, "G")
+		if m.sel[TabOverview] != m.rowCount(TabOverview)-1 || !contains(m.Frame(), "hb-line-10") {
+			t.Fatalf("G on tall hand-back: sel=%d scroll=%d\n%s", m.sel[TabOverview], m.scroll[TabOverview], plain(m.Frame()))
+		}
+		if bad := holes(m.Frame(), w, h); bad != nil {
+			t.Fatalf("G holes: %v", bad)
+		}
+
+		// g resets to row 0 top.
+		m = press(t, m, "g")
+		if m.sel[TabOverview] != 0 || m.scroll[TabOverview] != 0 || !contains(m.Frame(), "SYSTEM ALERTS") {
+			t.Fatalf("g reset: sel=%d scroll=%d\n%s", m.sel[TabOverview], m.scroll[TabOverview], plain(m.Frame()))
+		}
+	})
+}
+
+func TestMailOpenAndParticipantCycle(t *testing.T) {
+	w, h := refSize(t, layer.Drawer)
+	type ran struct {
+		env  []string
+		name string
+		args []string
+	}
+
+	t.Run("o on Mail writes read-only markdown with metadata and authorized excerpt, opens md-viewer, minimizes", func(t *testing.T) {
+		dir := t.TempDir()
+		rec := &recorder{}
+		var runs []ran
+		d := Deps{Layer: rec, CacheDir: dir,
+			LookPath: func(string) (string, error) { return "/opt/bin/md-viewer", nil },
+			Exec: func(_ context.Context, env []string, name string, args ...string) error {
+				runs = append(runs, ran{env, name, args})
+				return nil
+			}}
+		m := build(t, "edited-crew-attention", w, h, d, Options{Tab: "mail"})
+		// Select m1 which has an authorized excerpt (Kind=todo, Priority=normal, Body="Wire the token refresh.").
+		m = press(t, m, "g", "o")
+		path := filepath.Join(dir, "rex-amq-ui", "session_s-mail-2026-11-16T09-00-00.000Z_m1.md")
+		if len(runs) != 1 || runs[0].name != "/opt/bin/md-viewer" || !reflect.DeepEqual(runs[0].args, []string{"open", path}) ||
+			!reflect.DeepEqual(runs[0].env, []string{"REX_BLOCK=" + focusedPane}) {
+			t.Fatalf("runs %+v", runs)
+		}
+		b, err := os.ReadFile(path)
+		fi, _ := os.Stat(path)
+		if err != nil || fi.Mode().Perm() != 0o444 {
+			t.Fatalf("file err=%v mode=%v", err, fi.Mode())
+		}
+		got := string(b)
+		for _, want := range []string{
+			"# build it",
+			"- **From:** `claude-01`",
+			"- **To:** `claude-02`",
+			"- **ID:** `2026-11-16T09-00-00.000Z_m1`",
+			"- **Thread:** `p2p/claude-01__claude-02`",
+			"- **State:** `drained`",
+			"- **Created:** `2026-11-16T09:00:00Z`",
+			"- **Kind:** `todo`",
+			"- **Priority:** `normal`",
+			"Wire the token refresh.",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("mail markdown missing %q:\n%s", want, got)
+			}
+		}
+		if !reflect.DeepEqual(rec.got(), []string{"minimize"}) || !m.Paused() {
+			t.Fatalf("calls %v paused=%v", rec.got(), m.Paused())
+		}
+		// Reopening replaces the read-only file cleanly.
+		m = step(t, m, apc.Command{Verb: apc.Resume})
+		m = press(t, m, "o")
+		if len(runs) != 2 || m.hint != "" {
+			t.Fatalf("reopen mail: runs=%d hint=%q", len(runs), m.hint)
+		}
+	})
+
+	t.Run("o on Mail without authorized excerpt writes explicit notice and never reads AMQ files", func(t *testing.T) {
+		dir := t.TempDir()
+		rec := &recorder{}
+		var openedPath string
+		d := Deps{Layer: rec, CacheDir: dir,
+			LookPath: func(string) (string, error) { return "/opt/bin/md-viewer", nil },
+			Exec: func(_ context.Context, _ []string, _ string, args ...string) error {
+				openedPath = args[1]
+				return nil
+			}}
+		m := build(t, "edited-crew-attention", w, h, d, Options{Tab: "mail"})
+		// m3 (bounced, no authorized excerpt) is selected by default.
+		m = press(t, m, "o")
+		b, err := os.ReadFile(openedPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(b)
+		if !strings.Contains(got, "# review s1") || !strings.Contains(got, "bounced") ||
+			!strings.Contains(got, "No body excerpt was authorized in the session view.") {
+			t.Fatalf("unexpected unauthorized mail markdown:\n%s", got)
+		}
+	})
+
+	t.Run("o on Mail falls back to $EDITOR via OpenBeside, hints when empty or no viewer, and does not fire while typing search", func(t *testing.T) {
+		rec := &recorder{}
+		d := Deps{Layer: rec, CacheDir: t.TempDir(), Editor: "nvim -R",
+			LookPath: func(string) (string, error) { return "", errors.New("missing") }}
+		m := build(t, "edited-crew-attention", w, h, d, Options{Tab: "mail"})
+		// Typing 'o' inside / search adds to query instead of opening.
+		m = press(t, m, "/", "o", "enter")
+		if len(rec.got()) != 0 || m.mail.query != "o" {
+			t.Fatalf("typing o in search triggered open: calls=%v query=%q", rec.got(), m.mail.query)
+		}
+		m = press(t, m, "esc", "o")
+		got := rec.got()
+		if len(got) != 2 || !strings.HasPrefix(got[0], "beside "+focusedPane+" mail [nvim -R ") || got[1] != "minimize" {
+			t.Fatalf("editor fallback calls: %v", got)
+		}
+
+		// No messages selected -> hint.
+		empty := build(t, "recorded-bare", w, h, Deps{CacheDir: t.TempDir()}, Options{Tab: "mail"})
+		empty = press(t, empty, "o")
+		if !contains(empty.Frame(), "no message selected") {
+			t.Fatalf("empty mail open:\n%s", plain(empty.Frame()))
+		}
+	})
+
+	t.Run("p skips duplicate/empty To and resets cleanly on move or esc", func(t *testing.T) {
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "mail"})
+		// Add a self-addressed message m5 and a multi-recipient message m6.
+		m5 := adapter.Message{ID: "2026-11-16T09-05-00.000Z_m5", From: "pi-04", To: []string{"pi-04"}, Subject: "self note", State: adapter.MsgDrained, CreatedAt: m.now().Add(-time.Minute)}
+		m6 := adapter.Message{ID: "2026-11-16T09-06-00.000Z_m6", From: "claude-01", To: []string{"claude-02", "pi-04"}, Subject: "multi", State: adapter.MsgQueued, CreatedAt: m.now()}
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.MessageUpsert{Header: next(m), Message: m5}})
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.MessageUpsert{Header: next(m), Message: m6}})
+
+		// Search matches secondary recipient pi-04 on m6.
+		m = press(t, m, "/", "p", "i", "-", "0", "4", "enter")
+		if !contains(m.Frame(), "multi") || !contains(m.Frame(), "self note") || contains(m.Frame(), "build it") {
+			t.Fatalf("search secondary To:\n%s", plain(m.Frame()))
+		}
+		m = press(t, m, "esc")
+
+		// Move to m5 (self-addressed pi-04 -> pi-04): p sets pi-04, second p clears immediately (skips duplicate To).
+		m = press(t, m, "G", "k")
+		if cur, _ := m.selectedMail(); cur.ID != m5.ID {
+			t.Fatalf("expected m5 selected, got %+v", cur)
+		}
+		m = press(t, m, "p")
+		if m.mail.from != "pi-04" {
+			t.Fatalf("1st p on self-addressed: from=%q", m.mail.from)
+		}
+		m = press(t, m, "p")
+		if m.mail.from != "" {
+			t.Fatalf("2nd p on self-addressed should clear, got from=%q", m.mail.from)
+		}
+
+		// Move selection during active filter resets cycle cleanly and never no-ops.
+		m = press(t, m, "g", "p") // on m1 (claude-01 -> claude-02), sets from=claude-01
+		if m.mail.from != "claude-01" {
+			t.Fatalf("m1 1st p: from=%q", m.mail.from)
+		}
+		m = press(t, m, "j") // move to m2 (claude-02 -> claude-01); cycle resets
+		if m.mail.cycleID != "" {
+			t.Fatalf("cycleID not cleared on move: %q", m.mail.cycleID)
+		}
+		m = press(t, m, "p") // starts m2's cycle at From=claude-02
+		if m.mail.from != "claude-02" {
+			t.Fatalf("m2 fresh cycle should filter by claude-02, got %q", m.mail.from)
+		}
+		m = press(t, m, "esc") // clears filter and resets cycle
+		if m.mail.from != "" || m.mail.cycleID != "" {
+			t.Fatalf("esc did not reset filter/cycle: from=%q cycle=%q", m.mail.from, m.mail.cycleID)
+		}
+	})
+}
+
+func TestDrawerCompactBadgesAndDynamicWidths(t *testing.T) {
+	t.Run("compact model/effort badges in Drawer", func(t *testing.T) {
+		cases := []struct {
+			model, effort, want string
+		}{
+			{"gemini-4-neon-high", "high", "neon/hi"},
+			{"gemini-4-carbon-high", "high", "carbon/hi"},
+			{"claude-opus-5-5", "high", "opus/hi"},
+			{"claude-sonnet-4-6", "medium", "sonnet/med"},
+			{"claude-haiku-4-5-20251001", "low", "haiku/lo"},
+			{"auto/gpt-6.1-sol", "high", "sol/hi"},
+			{"openai/gpt-5.4-codex", "xhigh", "codex/xhi"},
+			{"gpt-5", "high", "gpt-5/hi"},
+			{"gpt-4o", "medium", "gpt-4o/med"},
+			{"opus", "high", "opus/hi"},
+			{"sonnet", "", "sonnet"},
+			{"", "", "—"},
+		}
+		for _, tc := range cases {
+			got := memberModelText(adapter.Agent{Model: tc.model, Effort: tc.effort}, false)
+			if got != tc.want {
+				t.Errorf("memberModelText(%q, %q, drawer) = %q, want %q", tc.model, tc.effort, got, tc.want)
+			}
+		}
+		// Board keeps the full model/effort.
+		if got := memberModelText(adapter.Agent{Model: "gemini-4-neon-high", Effort: "high"}, true); got != "gemini-4-neon-high/high" {
+			t.Errorf("board model = %q", got)
+		}
+	})
+
+	t.Run("dynamic member column widths give Task more room in Drawer", func(t *testing.T) {
+		w, h := refSize(t, layer.Drawer)
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "members"})
+		// Replace agents with short handles and verbose model IDs + long task descriptions.
+		a1 := adapter.Agent{
+			Handle: "agy-72", Role: "lead", Model: "gemini-4-neon-high", Effort: "high",
+			Task:      "implement responsive drawer column widths",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive},
+			Activity:  adapter.Activity{State: "working"},
+		}
+		a2 := adapter.Agent{
+			Handle: "codex-37", Role: "rev", Model: "auto/gpt-6.1-sol", Effort: "xhigh",
+			Task:      "review slice s3 mail and overview layout",
+			Lifecycle: adapter.Lifecycle{State: adapter.LifeLive},
+			Activity:  adapter.Activity{State: "working"},
+		}
+		snap := adapter.Snapshot{
+			Header: adapter.Header{Schema: 1, Stream: "s-compact", Seq: 1},
+			Scope:  m.st.Scope,
+			Agents: []adapter.Agent{a1, a2},
+			Panel:  m.st.Panel,
+		}
+		m = step(t, m, adapter.FrameUpdate{Frame: snap})
+		f := m.Frame()
+		if bad := holes(f, w, h); bad != nil {
+			t.Fatalf("drawer holes: %v", bad)
+		}
+		for _, want := range []string{
+			"neon/hi",
+			"sol/xhi",
+			"implement responsive drawer column widths",
+			"review slice s3 mail and overview layout",
+		} {
+			if !contains(f, want) {
+				t.Fatalf("drawer members missing %q:\n%s", want, plain(f))
+			}
+		}
+		// Narrow drawer (55 cols) still preserves task text and paints with zero holes.
+		m = step(t, m, tea.WindowSizeMsg{Width: 55, Height: 20})
+		if bad := holes(m.Frame(), 55, 20); bad != nil {
+			t.Fatalf("narrow drawer holes: %v", bad)
+		}
+		if !contains(m.Frame(), "neon/hi") || !contains(m.Frame(), "implement responsive") {
+			t.Fatalf("narrow drawer lost task:\n%s", plain(m.Frame()))
+		}
+	})
+
+	t.Run("long Overview alert reasons wrap cleanly in Drawer", func(t *testing.T) {
+		w, h := refSize(t, layer.Drawer)
+		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "overview"})
+		longSubject := "S3 uncapped Mail/Overview scrolling, o open in md-viewer, p participant filter, and responsive Drawer widths"
+		longMsg := adapter.Message{
+			ID:        "2026-11-16T09-07-00.000Z_m_long",
+			From:      "claude-01",
+			To:        []string{"codex-03"},
+			Subject:   longSubject,
+			State:     adapter.MsgQueued,
+			Bounced:   true,
+			CreatedAt: m.now().Add(-2 * time.Minute),
+		}
+		m = step(t, m, adapter.FrameUpdate{Frame: adapter.MessageUpsert{Header: next(m), Message: longMsg}})
+		f := m.Frame()
+		if bad := holes(f, w, h); bad != nil {
+			t.Fatalf("wrapped alert holes: %v", bad)
+		}
+		// Both the start and end of the long bounced subject appear without truncation.
+		if !contains(f, "S3 uncapped Mail/Overview") || !contains(f, "responsive Drawer widths") {
+			t.Fatalf("long alert reason did not wrap cleanly:\n%s", plain(f))
+		}
+		// Selecting the wrapped alert highlights all its continuation lines on Overlay.
+		for range 4 {
+			m = press(t, m, "j")
+		}
+		overlay := sgrBg(m.pal.Overlay)
+		var highlighted int
+		for _, l := range strings.Split(m.Frame(), "\n") {
+			p := plain(l)
+			if strings.Contains(p, "S3 uncapped") || strings.Contains(p, "responsive Drawer widths") {
+				if !strings.Contains(l, overlay) {
+					t.Errorf("wrapped alert line missing overlay bg: %q", p)
+				}
+				highlighted++
+			}
+		}
+		if highlighted < 2 {
+			t.Fatalf("expected wrapped alert to span >=2 highlighted lines, got %d\n%s", highlighted, plain(m.Frame()))
 		}
 	})
 }

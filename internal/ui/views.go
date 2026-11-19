@@ -19,10 +19,8 @@ type entry struct {
 	row         int
 }
 
-// list draws entries into c, scrolled to show the selected row: centred
-// when it can be, its last line kept on screen, and its first line always.
-func list(c *canvas, es []entry, sel int) {
-	first, last := -1, -1
+func rowBounds(es []entry, sel int) (first, last int) {
+	first, last = -1, -1
 	for i, e := range es {
 		if e.row == sel {
 			if first < 0 {
@@ -31,13 +29,26 @@ func list(c *canvas, es []entry, sel int) {
 			last = i
 		}
 	}
+	return first, last
+}
+
+// list draws entries into c, scrolled to show the selected row: centred
+// when it fits in the viewport, or scrolled line-by-line by off when the
+// selected row is taller than the viewport.
+func list(c *canvas, es []entry, sel, off int) {
+	first, last := rowBounds(es, sel)
 	n, start := c.left(), 0
-	if first >= 0 && len(es) > n {
-		start = max(first-n/2, 0)
-		if last >= start+n {
-			start = last - n + 1
+	if first >= 0 && n > 0 && len(es) > n {
+		if rowH := last - first + 1; rowH > n {
+			off = min(max(off, 0), rowH-n)
+			start = first + off
+		} else {
+			start = max(first-n/2, 0)
+			if last >= start+n {
+				start = last - n + 1
+			}
+			start = min(start, first, len(es)-n)
 		}
-		start = min(start, first, len(es)-n)
 	}
 	for _, e := range es[start:] {
 		if c.full() {
@@ -45,6 +56,32 @@ func list(c *canvas, es []entry, sel int) {
 		}
 		c.addLR(e.bg, e.left, e.right)
 	}
+}
+
+func (m Model) listEntries(t Tab) ([]entry, int) {
+	switch t {
+	case TabOverview:
+		return m.overviewEntries(), m.contentHeight()
+	case TabMembers:
+		return m.memberEntries(), m.contentHeight()
+	case TabMail:
+		return m.mailEntries(), max(m.contentHeight()-1, 0)
+	case TabEpics:
+		return m.epicsEntries(), m.contentHeight()
+	}
+	return nil, 0
+}
+
+func (m Model) maxScroll(t Tab, sel int) int {
+	es, n := m.listEntries(t)
+	if n <= 0 {
+		return 0
+	}
+	first, last := rowBounds(es, sel)
+	if first < 0 {
+		return 0
+	}
+	return max(last-first+1-n, 0)
 }
 
 // fit is untrusted text cut or padded to exactly n cells.
@@ -63,7 +100,7 @@ func capsule(text string, fg, bg color.Color) Span {
 // overview lists the alerts, one row each, then the narrator, the
 // lifecycle, and the hand-back, a row per section, so j/k and G scroll
 // through all of it.
-func (m Model) overview(c *canvas) { list(c, m.overviewEntries(), m.sel[TabOverview]) }
+func (m Model) overview(c *canvas) { list(c, m.overviewEntries(), m.sel[TabOverview], m.scroll[TabOverview]) }
 
 // overviewSections are the rows below the alerts: narrator, then the
 // lifecycle and hand-back when the view has them.
@@ -102,8 +139,19 @@ func (m Model) overviewEntries() []entry {
 			if i == m.sel[TabOverview] {
 				bg = p.Overlay
 			}
-			add(i, bg, []Span{{Text: " " + icon + " ", Fg: fg, Bold: true}, {Text: a.text, Fg: p.Fg}},
-				Span{Text: " " + ago(now, a.since) + " ", Fg: p.Muted})
+			prefix := " " + icon + " "
+			age := Span{Text: " " + ago(now, a.since) + " ", Fg: p.Muted}
+			textW := m.innerW() - ansi.StringWidth(prefix) - age.width()
+			if textW <= 0 {
+				add(i, bg, []Span{{Text: prefix, Fg: fg, Bold: true}, {Text: a.text, Fg: p.Fg}}, age)
+				continue
+			}
+			wrapped := wrapLine(a.text, textW)
+			add(i, bg, []Span{{Text: prefix, Fg: fg, Bold: true}, {Text: wrapped[0], Fg: p.Fg}}, age)
+			indent := strings.Repeat(" ", ansi.StringWidth(prefix))
+			for _, cont := range wrapped[1:] {
+				add(i, bg, []Span{{Text: indent + cont, Fg: p.Fg}})
+			}
 		}
 		add(len(as)-1, p.Bg, nil)
 	}
@@ -111,8 +159,7 @@ func (m Model) overviewEntries() []entry {
 	v := m.view()
 	if v != nil && !v.NoView() && v.Narrative != nil && v.Narrative.Text != "" {
 		add(row, p.Bg, []Span{{Text: " from narrator (" + v.Narrator + ") · " + ago(now, v.Narrative.At) + " ago", Fg: p.Muted, Italic: true}})
-		lines := wrap(v.Narrative.Text, m.innerW()-2)
-		for _, l := range lines[:min(len(lines), 6)] {
+		for _, l := range wrap(v.Narrative.Text, m.innerW()-2) {
 			add(row, p.Bg, []Span{{Text: " " + l, Fg: p.Fg}})
 		}
 	} else {
@@ -177,23 +224,23 @@ func (m Model) lifecycleCapsule(state string) Span {
 	return capsule(orDash(state), p.Muted, p.Surface)
 }
 
-// handBackCardLines is how much of a hand-back the card shows.
-const handBackCardLines = 8
-
-// handBackCard is the hand-back's first lines with its Blocked on me
-// section picked out, pulled up when it starts past the card's end.
+// handBackCard renders the full hand-back wrapped paragraph-by-paragraph
+// with its Blocked on me section highlighted.
 func (m Model) handBackCard(hb *adapter.HandBack) []entry {
 	p, bg := m.pal, m.pal.BlueBg
 	var es []entry
 	add := func(spans ...Span) { es = append(es, entry{left: spans, bg: bg}) }
 	title := fmt.Sprintf(" Hand-back #%d · %s · %s ago", hb.Seq, hb.By, ago(m.now(), hb.At))
 	es = append(es, entry{left: []Span{{Text: title, Fg: p.Blue, Bold: true}}, right: []Span{{Text: "o", Fg: p.Fg, Bold: true}, {Text: " open ", Fg: p.Muted}}, bg: bg})
-	lines := strings.Split(strings.TrimRight(hb.Body, "\n"), "\n")
+	body := strings.ReplaceAll(hb.Body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "\n")
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
+		return es
+	}
+	w := m.innerW() - 4
 	blocked := false
-	for i, l := range lines {
-		if i >= handBackCardLines {
-			break
-		}
+	for _, l := range strings.Split(body, "\n") {
 		fg, bold := p.Fg, false
 		switch {
 		case blockedOnMe.MatchString(l):
@@ -203,28 +250,27 @@ func (m Model) handBackCard(hb *adapter.HandBack) []entry {
 		case blocked:
 			fg = p.Yellow
 		}
-		add(Span{Text: "   " + l, Fg: fg, Bold: bold})
-	}
-	if len(lines) > handBackCardLines {
-		for i := handBackCardLines; i < len(lines); i++ {
-			if blockedOnMe.MatchString(lines[i]) {
-				add(Span{Text: "   … " + strings.TrimSpace(lines[i]), Fg: p.Yellow, Bold: true})
-				if i+1 < len(lines) {
-					add(Span{Text: "   " + lines[i+1], Fg: p.Yellow})
-				}
-				break
+		if w <= 0 {
+			continue
+		}
+		for _, wl := range wrapLine(l, w) {
+			if wl == "" {
+				add()
+			} else {
+				add(Span{Text: "   " + wl, Fg: fg, Bold: bold})
 			}
 		}
-		add(Span{Text: fmt.Sprintf("   … %d more lines", len(lines)-handBackCardLines), Fg: p.Muted, Italic: true})
 	}
 	return es
 }
 
-func (m Model) membersView(c *canvas) {
+func (m Model) memberEntries() []entry {
 	p := m.pal
 	var es []entry
 	last := group(-1)
 	ms := m.members()
+	wide := m.innerW() >= 100
+	nameW, modelW := m.memberColumns(ms, wide)
 	for i, a := range ms {
 		if g := m.groupOf(a); g != last {
 			last = g
@@ -234,20 +280,183 @@ func (m Model) membersView(c *canvas) {
 				es = append(es, entry{left: []Span{{Text: " " + groupNames[g], Fg: p.Muted, Bold: true}}, bg: p.Bg, row: -1})
 			}
 		}
-		es = append(es, m.memberEntry(a, i))
+		es = append(es, m.memberEntry(a, i, wide, nameW, modelW))
 	}
 	if n := m.retiredCount(); n > 0 && !m.retired {
 		es = append(es, entry{left: []Span{{Text: fmt.Sprintf(" ▸ Retired %d", n), Fg: p.Muted, Bold: true}, {Text: "  r to show", Fg: p.Faint}}, bg: p.Bg, row: -1})
 	}
+	return es
+}
+
+func (m Model) membersView(c *canvas) {
+	p := m.pal
+	ms := m.members()
 	if len(ms) == 0 && m.retiredCount() == 0 {
 		c.blank()
 		c.add(Span{Text: " No agents in this session.", Fg: p.Faint, Italic: true})
 		return
 	}
-	list(c, es, m.sel[TabMembers])
+	list(c, m.memberEntries(), m.sel[TabMembers], m.scroll[TabMembers])
 }
 
-func (m Model) memberEntry(a adapter.Agent, i int) entry {
+func memberDisplayName(a adapter.Agent) string {
+	if a.Role != "" {
+		return a.Role + "(" + a.Handle + ")"
+	}
+	return a.Handle
+}
+
+func (m Model) memberColumns(ms []adapter.Agent, wide bool) (nameW, modelW int) {
+	maxName, maxModel := 0, 0
+	for _, a := range ms {
+		if w := ansi.StringWidth(clean(memberDisplayName(a))); w > maxName {
+			maxName = w
+		}
+		if m.groupOf(a) != groupRetired {
+			if w := ansi.StringWidth(clean(memberModelText(a, wide))); w > maxModel {
+				maxModel = w
+			}
+		}
+	}
+	if wide {
+		return min(max(maxName, 16), 30), min(max(maxModel, 8), 24)
+	}
+	nameW = min(max(maxName, 8), 24)
+	modelW = min(max(maxModel, 1), 12)
+	const rowOverhead = 9 // " " + idx(2) + mark(2) + dot(1) + " "(1) + 2 column spaces
+	taskBudget := max(m.innerW()/3, 18)
+	if avail := m.innerW() - rowOverhead - taskBudget; avail > 0 && nameW+modelW > avail {
+		modelW = min(modelW, max(avail/3, 6))
+		nameW = max(min(nameW, avail-modelW), min(8, avail))
+		if nameW+modelW > avail {
+			modelW = max(avail-nameW, 1)
+		}
+	}
+	return nameW, modelW
+}
+
+func compactEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "high":
+		return "hi"
+	case "medium":
+		return "med"
+	case "low":
+		return "lo"
+	case "xhigh":
+		return "xhi"
+	case "minimal":
+		return "min"
+	default:
+		return strings.TrimSpace(effort)
+	}
+}
+
+func isVersionToken(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range tok {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			continue
+		}
+		if r == '.' {
+			continue
+		}
+		return false
+	}
+	return hasDigit
+}
+
+func isEffortToken(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "high", "medium", "low", "xhigh", "minimal":
+		return true
+	}
+	return false
+}
+
+func startsWithLetter(s string) bool {
+	if s == "" {
+		return false
+	}
+	b := s[0]
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func compactModelName(model, effort string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return ""
+	}
+	if i := strings.LastIndex(m, "/"); i >= 0 && i+1 < len(m) {
+		m = m[i+1:]
+	}
+	tokens := strings.Split(m, "-")
+	if strings.TrimSpace(effort) != "" && len(tokens) > 1 && isEffortToken(tokens[len(tokens)-1]) {
+		tokens = tokens[:len(tokens)-1]
+	}
+	for len(tokens) > 1 {
+		last := strings.ToLower(tokens[len(tokens)-1])
+		if last == "latest" || last == "preview" || (len(last) == 8 && isVersionToken(last)) {
+			tokens = tokens[:len(tokens)-1]
+			continue
+		}
+		break
+	}
+	if len(tokens) <= 1 {
+		return strings.Join(tokens, "-")
+	}
+	switch strings.ToLower(tokens[0]) {
+	case "claude", "gemini":
+		var kept []string
+		for _, tok := range tokens[1:] {
+			if !isVersionToken(tok) {
+				kept = append(kept, tok)
+			}
+		}
+		if len(kept) > 0 {
+			return strings.Join(kept, "-")
+		}
+	case "gpt":
+		var named []string
+		for _, tok := range tokens[1:] {
+			if !isVersionToken(tok) && startsWithLetter(tok) {
+				named = append(named, tok)
+			}
+		}
+		if len(named) > 0 {
+			return strings.Join(named, "-")
+		}
+	}
+	return strings.Join(tokens, "-")
+}
+
+func memberModelText(a adapter.Agent, wide bool) string {
+	if wide {
+		model := a.Model
+		if a.Effort != "" {
+			model += "/" + a.Effort
+		}
+		return orDash(model)
+	}
+	model := compactModelName(a.Model, a.Effort)
+	eff := compactEffort(a.Effort)
+	switch {
+	case model != "" && eff != "":
+		return model + "/" + eff
+	case model != "":
+		return model
+	case eff != "":
+		return eff
+	default:
+		return "—"
+	}
+}
+
+func (m Model) memberEntry(a adapter.Agent, i int, wide bool, nameW, modelW int) entry {
 	p := m.pal
 	bg := p.Bg
 	if i == m.sel[TabMembers] {
@@ -262,19 +471,11 @@ func (m Model) memberEntry(a adapter.Agent, i int) entry {
 		mark = Span{Text: "▶ ", Fg: p.Aqua, Bold: true}
 	}
 	dot, dotFg := m.statusDot(a)
-	name := a.Handle
-	if a.Role != "" {
-		name = a.Role + "(" + a.Handle + ")"
-	}
+	name := memberDisplayName(a)
 	retired := m.groupOf(a) == groupRetired
 	nameFg := p.Fg
 	if retired {
 		nameFg = p.Faint
-	}
-	wide := m.innerW() >= 100
-	nameW := 26
-	if !wide {
-		nameW = 24
 	}
 	left := []Span{{Text: " " + idx, Fg: p.Faint}, mark, {Text: dot + " ", Fg: dotFg}, {Text: fit(name, nameW), Fg: nameFg, Bold: i == m.sel[TabMembers]}}
 	if retired {
@@ -285,11 +486,7 @@ func (m Model) memberEntry(a adapter.Agent, i int) entry {
 		left = append(left, Span{Text: " " + reason, Fg: p.Faint, Italic: true})
 		return entry{left: left, bg: bg, row: i}
 	}
-	model := a.Model
-	if a.Effort != "" {
-		model += "/" + a.Effort
-	}
-	left = append(left, Span{Text: " " + fit(orDash(model), 11), Fg: p.Muted})
+	left = append(left, Span{Text: " " + fit(memberModelText(a, wide), modelW), Fg: p.Muted})
 	if wide {
 		left = append(left, Span{Text: " " + fit(a.Tab, 10), Fg: p.Faint})
 	}
@@ -330,29 +527,9 @@ func (m Model) badges(a adapter.Agent) []Span {
 	return out
 }
 
-func (m Model) mailView(c *canvas) {
+func (m Model) mailEntries() []entry {
 	p := m.pal
-	bar := []Span{{Text: " "}}
-	switch {
-	case m.mail.typing:
-		bar = append(bar, Span{Text: "/ ", Fg: p.Blue, Bold: true}, Span{Text: m.mail.query, Fg: p.Fg}, Span{Text: "▏", Fg: p.Blue})
-	case m.mail.query != "":
-		bar = append(bar, capsule("/ "+m.mail.query, p.Blue, p.BlueBg), Span{Text: " "})
-	}
-	if m.mail.from != "" {
-		bar = append(bar, capsule("from/to "+m.mail.from, p.Aqua, p.Surface), Span{Text: " "})
-	}
-	follow := capsule("Follow", p.Faint, p.Surface)
-	if m.mail.follow {
-		follow = capsule("Follow", p.Green, p.GreenBg)
-	}
-	c.addLR(p.Bg, bar, []Span{follow, {Text: " "}})
 	rows := m.mailRows()
-	if len(rows) == 0 {
-		c.blank()
-		c.add(Span{Text: " No messages.", Fg: p.Faint, Italic: true})
-		return
-	}
 	var es []entry
 	for i, msg := range rows {
 		bg := p.Bg
@@ -373,16 +550,45 @@ func (m Model) mailView(c *canvas) {
 			m.mailCapsule(msg), {Text: " " + msg.Subject, Fg: p.Fg, Bold: i == m.sel[TabMail]}}
 		es = append(es, entry{left: left, bg: bg, row: i})
 		if open {
-			body := wrap(ex.Body, m.innerW()-8)
-			for _, l := range body[:min(len(body), 6)] {
-				es = append(es, entry{left: []Span{{Text: "       " + l, Fg: p.Muted}}, bg: p.Surface, row: i})
+			for _, l := range wrap(ex.Body, m.innerW()-8) {
+				if l == "" {
+					es = append(es, entry{bg: p.Surface, row: i})
+				} else {
+					es = append(es, entry{left: []Span{{Text: "       " + l, Fg: p.Muted}}, bg: p.Surface, row: i})
+				}
 			}
-			if ex.Truncated || len(body) > 6 {
+			if ex.Truncated {
 				es = append(es, entry{left: []Span{{Text: "       …", Fg: p.Faint}}, bg: p.Surface, row: i})
 			}
 		}
 	}
-	list(c, es, m.sel[TabMail])
+	return es
+}
+
+func (m Model) mailView(c *canvas) {
+	p := m.pal
+	bar := []Span{{Text: " "}}
+	switch {
+	case m.mail.typing:
+		bar = append(bar, Span{Text: "/ ", Fg: p.Blue, Bold: true}, Span{Text: m.mail.query, Fg: p.Fg}, Span{Text: "▏", Fg: p.Blue})
+	case m.mail.query != "":
+		bar = append(bar, capsule("/ "+m.mail.query, p.Blue, p.BlueBg), Span{Text: " "})
+	}
+	if m.mail.from != "" {
+		bar = append(bar, capsule("from/to "+m.mail.from, p.Aqua, p.Surface), Span{Text: " "})
+	}
+	follow := capsule("Follow", p.Faint, p.Surface)
+	if m.mail.follow {
+		follow = capsule("Follow", p.Green, p.GreenBg)
+	}
+	c.addLR(p.Bg, bar, []Span{follow, {Text: " "}})
+	es := m.mailEntries()
+	if len(es) == 0 {
+		c.blank()
+		c.add(Span{Text: " No messages.", Fg: p.Faint, Italic: true})
+		return
+	}
+	list(c, es, m.sel[TabMail], m.scroll[TabMail])
 }
 
 func (m Model) mailCapsule(msg adapter.Message) Span {
@@ -457,16 +663,10 @@ func compact(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
-func (m Model) epicsView(c *canvas) {
+func (m Model) epicsEntries() []entry {
 	p := m.pal
-	es := m.epics()
-	if len(es) == 0 {
-		c.blank()
-		c.add(Span{Text: " No Epics are linked to this personal agent yet.", Fg: p.Faint, Italic: true})
-		return
-	}
 	var out []entry
-	for i, e := range es {
+	for i, e := range m.epics() {
 		bg := p.Bg
 		if i == m.sel[TabEpics] {
 			bg = p.Overlay
@@ -499,5 +699,15 @@ func (m Model) epicsView(c *canvas) {
 		out = append(out, entry{left: []Span{say}, bg: bg, row: i})
 		out = append(out, entry{bg: p.Bg, row: i})
 	}
-	list(c, out, m.sel[TabEpics])
+	return out
+}
+
+func (m Model) epicsView(c *canvas) {
+	p := m.pal
+	if len(m.epics()) == 0 {
+		c.blank()
+		c.add(Span{Text: " No Epics are linked to this personal agent yet.", Fg: p.Faint, Italic: true})
+		return
+	}
+	list(c, m.epicsEntries(), m.sel[TabEpics], m.scroll[TabEpics])
 }

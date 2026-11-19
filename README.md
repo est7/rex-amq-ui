@@ -15,9 +15,9 @@ The panel has five tabs:
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | System alerts first: every member waiting on you, with a turn error, or stalled; bounced and dead-lettered mail; open obligations (`owed_by → owed_to`). Then the narrator's summary, the lifecycle, and the latest hand-back as a card with its *Blocked on me* items picked out. `o` opens the full hand-back. |
-| **Members** | The lead first, then *Active*, *Standing by*, and a folded *Retired* group (`r`). Each row has its number (`1`–`9`), `▶` on the pane you last focused, a status dot, `role(handle)`, model and effort, its tab (Board only), its task, and unread mail. `Enter` focuses the member's pane and hides the panel. |
-| **Mail** | Every message in time order: `from → to`, age, state (`queued`, `drained`, `bounced`, `dead_lettered`), subject. `/` searches subjects, `p` shows only the selected member's mail, `f` follows new mail, `Space` expands the excerpt you are allowed to see. |
+| **Overview** | System alerts first (wrapped cleanly in Drawer): every member waiting on you, with a turn error, or stalled; bounced and dead-lettered mail; open obligations (`owed_by → owed_to`). Then the narrator's uncapped summary, the lifecycle, and the full latest hand-back card with its *Blocked on me* section highlighted (`j`/`k` scroll line-by-line inside tall cards). `o` opens the full hand-back. |
+| **Members** | The lead first, then *Active*, *Standing by*, and a folded *Retired* group (`r`). Each row has its number (`1`–`9`), `▶` on the pane you last focused, a status dot, `role(handle)`, model and effort (compacted with dynamic column widths in Drawer so tasks stay readable), its tab (Board only), its task, and unread mail. `Enter` focuses the member's pane and hides the panel. |
+| **Mail** | Every message in time order: `from → to`, age, state (`queued`, `drained`, `bounced`, `dead_lettered`), subject. `/` searches Subject, From, To, and authorized excerpt Body, `p` cycles the selected message's participants (`From` → primary `To` → clear), `f` follows new mail, `Space` expands the full authorized excerpt (line-scrollable when tall), and `o` opens the selected message in `md-viewer` (or `$EDITOR`). |
 | **Graph** | A picture of who mails whom, drawn as an image: members around an ellipse, mail as arrows between them. A replay bar above it (`[` `]` step through messages, `L` back to Live, `h` hides retired members) and a legend below. Click a member to select it; click it again to go to its pane. See [Graph](#graph). |
 | **Epics** | Only in a session with a live personal agent, where it is the first tab: every linked Epic with its lifecycle, pending hand-back, alert count, and the narrator's latest line. `Enter` drills down into that Epic in-place inside the panel (`← <hub> › <epic>`) with its live Overview, Members, Mail, and Graph tabs; `s` switches Rex to that Epic's session, and `o` opens its hand-back. |
 
@@ -27,7 +27,7 @@ The panel has five tabs:
 - `rex-amq-adapter` v0.24.0 or later, the first release with `stream panel` (its v:2 command set). An older adapter has no `stream` command: it exits 2 with its usage text. The panel then shows `◌ Reconnecting` with that exit status and the end of the usage text, and keeps retrying; `waiting` prints the same error on stderr and exits 1. The panel looks for the adapter in this order: `$REX_AMQ_ADAPTER_BIN`, then `/opt/homebrew/opt/rex-amq-adapter/bin/rex-amq-adapter`, then `PATH`. `--adapter-bin` (or the plugin's `adapter_bin` option) overrides all three. When the adapter refuses to stream (its guard turns away an agent's pane or session, or it does not know an argument), the panel shows `✕ Refused` with the adapter's error code, message, and suggested next command, and `waiting` prints them on stderr. The panel tries again only when the adapter marks the refusal retryable; otherwise fix the cause and reopen the panel (`Q`, then the toggle key).
 - Go 1.27 to build it.
 - For the Graph tab, a terminal that reads Kitty graphics from temporary files (`t=t`) and sends SGR pixel mouse reports (mode 1016) for clicks. Rex's terminal is meant to do both; the Graph tab has not yet been watched on Rex (see [docs/design.md](docs/design.md#graph-renderer)).
-- Optional: `md-viewer` to read a full hand-back (`o`). Without it the panel opens a read-only copy in `$EDITOR`.
+- Optional: `md-viewer` to read a full hand-back or mail message (`o`). Without it the panel opens a read-only copy in `$EDITOR`.
 
 ## How to install
 
@@ -88,12 +88,12 @@ The plugin finds `rex-amq-ui` through your login shell (`$SHELL -l -c 'command -
 | Rex (plugin) | `Cmd+Shift+U` | `amqui_waiting`: with one member waiting on you, focus its pane; with several, show the panel on Overview |
 | Panel | `Tab` / `Shift+Tab` | Next / previous tab |
 | Panel | `z` | Drawer ↔ Board |
-| Panel | `j` `k`, `↑` `↓`, `g` `G` | Move; first / last |
+| Panel | `j` `k`, `↑` `↓`, `g` `G` | Move (line-by-line within tall expanded mail or Overview cards); first / last |
 | Panel | `1`–`9` | Select that row in Members or Epics |
 | Panel | `Enter` | Focus the member's pane (switching to the Epic's session when drilled down) or drill down into the selected Epic in-place on Epics |
 | Epics / Drilled Epic | `s` | Switch Rex to the selected (or drilled-down) Epic's session and hide the panel |
-| Overview / Epics | `o` | Open the full hand-back with `md-viewer` (or `$EDITOR`) |
-| Mail | `/`, `p`, `f`, `Space` | Search subjects, this member's mail only, follow, expand excerpt |
+| Overview / Epics / Mail | `o` | Open the full hand-back (Overview/Epics) or selected message metadata and authorized excerpt (Mail) with `md-viewer` (or `$EDITOR`) |
+| Mail | `/`, `p`, `f`, `Space`, `o` | Search Subject/From/To/Body, cycle selected message participants, follow, expand excerpt, open in viewer |
 | Graph | `[` `]`, `L`, `h` | Previous / next message, back to Live, hide retired |
 | Graph | click a member | Select it (Members follows); a second click focuses its pane and hides the panel |
 | Panel | `Esc` / `q` | Step back (clear a filter, close an excerpt, leave a drilled-down Epic); at the top, hide the panel |

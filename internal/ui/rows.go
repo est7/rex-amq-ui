@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/est7/rex-amq-ui/internal/adapter"
@@ -178,11 +179,11 @@ func (m Model) memberHandle(i int) string {
 }
 
 // mailRows are the messages the Mail tab lists: oldest first, filtered by
-// the search and the member filter.
+// the search and the participant filter.
 func (m Model) mailRows() []adapter.Message {
 	out := make([]adapter.Message, 0, len(m.st.Messages))
 	for _, msg := range m.st.Messages {
-		if !matches(msg.Subject, m.mail.query) {
+		if !m.mailMatches(msg, m.mail.query) {
 			continue
 		}
 		if f := m.mail.from; f != "" && msg.From != f && !slices.Contains(msg.To, f) {
@@ -193,6 +194,102 @@ func (m Model) mailRows() []adapter.Message {
 	return chronological(out)
 }
 
+func (m Model) selectedMail() (adapter.Message, bool) {
+	rows := m.mailRows()
+	i := m.sel[TabMail]
+	if i < 0 || i >= len(rows) {
+		return adapter.Message{}, false
+	}
+	return rows[i], true
+}
+
+// mailMatches reports whether query appears case-insensitively in msg's
+// Subject, From, any To recipient, or its authorized excerpt Body.
+func (m Model) mailMatches(msg adapter.Message, query string) bool {
+	if query == "" {
+		return true
+	}
+	q := strings.ToLower(query)
+	if strings.Contains(strings.ToLower(msg.Subject), q) ||
+		strings.Contains(strings.ToLower(msg.From), q) {
+		return true
+	}
+	for _, to := range msg.To {
+		if strings.Contains(strings.ToLower(to), q) {
+			return true
+		}
+	}
+	if ex, ok := m.excerpt(msg.ID); ok && strings.Contains(strings.ToLower(ex.Body), q) {
+		return true
+	}
+	return false
+}
+
+func messageParticipants(msg adapter.Message) []string {
+	var out []string
+	if msg.From != "" {
+		out = append(out, msg.From)
+	}
+	if len(msg.To) > 0 && msg.To[0] != "" && msg.To[0] != msg.From {
+		out = append(out, msg.To[0])
+	}
+	return out
+}
+
+// cycleMailParticipant cycles m.mail.from across the currently selected
+// message's participants (From -> primary To -> clear), anchoring selection
+// on that message by ID when it stays visible.
+func (m *Model) cycleMailParticipant() {
+	msg, ok := m.selectedMail()
+	if !ok {
+		if m.mail.from != "" {
+			m.mail.from = ""
+			m.mail.cycleID = ""
+		}
+		return
+	}
+	parts := messageParticipants(msg)
+	if len(parts) == 0 {
+		m.mail.from = ""
+		m.mail.cycleID = ""
+		return
+	}
+	next := ""
+	if m.mail.cycleID == msg.ID {
+		if idx := slices.Index(parts, m.mail.from); idx >= 0 && idx+1 < len(parts) {
+			next = parts[idx+1]
+		}
+	} else {
+		if m.mail.from == parts[0] {
+			if len(parts) > 1 {
+				next = parts[1]
+			}
+		} else {
+			next = parts[0]
+		}
+	}
+	m.mail.from = next
+	if next == "" {
+		m.mail.cycleID = ""
+	} else {
+		m.mail.cycleID = msg.ID
+	}
+	m.anchorMail(msg.ID)
+}
+
+func (m *Model) anchorMail(id string) {
+	rows := m.mailRows()
+	for i, r := range rows {
+		if r.ID == id {
+			m.sel[TabMail] = i
+			m.scroll[TabMail] = min(max(m.scroll[TabMail], 0), m.maxScroll(TabMail, i))
+			return
+		}
+	}
+	m.sel[TabMail] = clampSel(m.sel[TabMail], len(rows))
+	m.scroll[TabMail] = 0
+}
+
 func chronological(ms []adapter.Message) []adapter.Message {
 	slices.SortStableFunc(ms, func(a, b adapter.Message) int {
 		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
@@ -200,21 +297,27 @@ func chronological(ms []adapter.Message) []adapter.Message {
 	return ms
 }
 
-// excerpt is the body the narrator was allowed to read for message id:
-// only messages the view lists under control_plane or activity carry one.
-func (m Model) excerpt(id string) (adapter.ViewMessage, bool) {
+// viewMessage returns the session view entry for message id when present.
+func (m Model) viewMessage(id string) (adapter.ViewMessage, bool) {
 	if m.st.Panel == nil || m.st.Panel.View == nil {
 		return adapter.ViewMessage{}, false
 	}
 	v := m.st.Panel.View
 	for _, list := range [][]adapter.ViewMessage{v.ControlPlane, v.Activity} {
 		for _, vm := range list {
-			if vm.Ref == id && vm.Body != "" {
+			if vm.Ref == id {
 				return vm, true
 			}
 		}
 	}
 	return adapter.ViewMessage{}, false
+}
+
+// excerpt is the body the narrator was allowed to read for message id:
+// only messages the view lists under control_plane or activity carry one.
+func (m Model) excerpt(id string) (adapter.ViewMessage, bool) {
+	vm, ok := m.viewMessage(id)
+	return vm, ok && vm.Body != ""
 }
 
 func (m *Model) toggleExcerpt() {
@@ -233,6 +336,7 @@ func (m *Model) toggleExcerpt() {
 	} else {
 		m.mail.expanded[id] = true
 	}
+	m.scroll[TabMail] = 0
 }
 
 // graphMessages are the messages the Graph replays, oldest first; with

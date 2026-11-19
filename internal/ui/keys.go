@@ -3,7 +3,6 @@ package ui
 import (
 	"cmp"
 	"context"
-	"strings"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -48,11 +47,20 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.move(-1)
 		return m, nil
 	case "g", "home":
+		if m.tab == TabMail && m.sel[TabMail] != 0 {
+			m.mail.cycleID = ""
+		}
 		m.sel[m.tab] = 0
+		m.scroll[m.tab] = 0
 		m.unfollow()
 		return m, nil
 	case "G", "end":
-		m.sel[m.tab] = max(m.rowCount(m.tab)-1, 0)
+		last := max(m.rowCount(m.tab)-1, 0)
+		if m.tab == TabMail && m.sel[TabMail] != last {
+			m.mail.cycleID = ""
+		}
+		m.sel[m.tab] = last
+		m.scroll[m.tab] = m.maxScroll(m.tab, last)
 		return m, nil
 	case "esc", "q":
 		if m.stepBack() {
@@ -86,6 +94,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if len(s) == 1 && s[0] >= '1' && s[0] <= '9' && (m.tab == TabMembers || m.tab == TabEpics) {
 		if i := int(s[0] - '1'); i < m.rowCount(m.tab) {
 			m.sel[m.tab] = i
+			m.scroll[m.tab] = 0
 		}
 		return m, nil
 	}
@@ -104,7 +113,7 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.sel[TabMembers] = clampSel(m.sel[TabMembers], m.rowCount(TabMembers))
 		}
 	case TabMail:
-		return m.mailKey(s), nil
+		return m.mailKey(s)
 	case TabGraph:
 		m.graphKey(s)
 	}
@@ -123,9 +132,50 @@ func (m *Model) cycle(d int) {
 }
 
 func (m *Model) move(d int) {
-	m.sel[m.tab] = clampSel(m.sel[m.tab]+d, m.rowCount(m.tab))
-	if d < 0 {
-		m.unfollow()
+	if d == 0 {
+		return
+	}
+	t := m.tab
+	n := m.rowCount(t)
+	if n == 0 {
+		m.sel[t] = 0
+		m.scroll[t] = 0
+		return
+	}
+	sel := clampSel(m.sel[t], n)
+	maxOff := m.maxScroll(t, sel)
+	off := min(max(m.scroll[t], 0), maxOff)
+	if d > 0 {
+		if off < maxOff {
+			m.scroll[t] = off + 1
+			return
+		}
+		next := clampSel(sel+1, n)
+		if next != sel {
+			m.sel[t] = next
+			m.scroll[t] = 0
+			if t == TabMail {
+				m.mail.cycleID = ""
+			}
+		} else {
+			m.scroll[t] = maxOff
+		}
+		return
+	}
+	m.unfollow()
+	if off > 0 {
+		m.scroll[t] = off - 1
+		return
+	}
+	prev := clampSel(sel-1, n)
+	if prev != sel {
+		m.sel[t] = prev
+		m.scroll[t] = m.maxScroll(t, prev)
+		if t == TabMail {
+			m.mail.cycleID = ""
+		}
+	} else {
+		m.scroll[t] = 0
 	}
 }
 
@@ -139,22 +189,31 @@ func (m *Model) unfollow() {
 func (m *Model) stepBack() bool {
 	switch m.tab {
 	case TabMail:
+		cur, hasCur := m.selectedMail()
 		switch {
 		case len(m.mail.expanded) > 0:
 			clear(m.mail.expanded)
 		case m.mail.from != "":
 			m.mail.from = ""
+			m.mail.cycleID = ""
 		case m.mail.query != "":
 			m.mail.query = ""
+			m.mail.cycleID = ""
 		default:
 			return false
 		}
-		m.sel[TabMail] = clampSel(m.sel[TabMail], m.rowCount(TabMail))
+		if hasCur {
+			m.anchorMail(cur.ID)
+		} else {
+			m.sel[TabMail] = clampSel(m.sel[TabMail], m.rowCount(TabMail))
+			m.scroll[TabMail] = 0
+		}
 		return true
 	case TabMembers:
 		if m.retired {
 			m.retired = false
 			m.sel[TabMembers] = clampSel(m.sel[TabMembers], m.rowCount(TabMembers))
+			m.scroll[TabMembers] = 0
 			return true
 		}
 	case TabGraph:
@@ -213,26 +272,30 @@ func (m *Model) focus(handle string) tea.Cmd {
 	return m.act("focus "+handle, true, func(ctx context.Context, c Controller) error { return c.Jump(ctx, block) })
 }
 
-func (m Model) mailKey(s string) Model {
+func (m Model) mailKey(s string) (Model, tea.Cmd) {
 	switch s {
 	case "/":
 		m.mail.typing = true
 	case "p":
-		if m.mail.from != "" {
-			m.mail.from = ""
-		} else if h := m.memberHandle(m.sel[TabMembers]); h != "" {
-			m.mail.from = h
-		}
+		m.cycleMailParticipant()
+		return m, nil
 	case "f":
 		m.mail.follow = !m.mail.follow
 		if m.mail.follow {
-			m.sel[TabMail] = max(m.rowCount(TabMail)-1, 0)
+			last := max(m.rowCount(TabMail)-1, 0)
+			if m.sel[TabMail] != last {
+				m.mail.cycleID = ""
+				m.scroll[TabMail] = 0
+			}
+			m.sel[TabMail] = last
 		}
 	case "space":
 		m.toggleExcerpt()
+	case "o":
+		return m, m.openMail()
 	}
 	m.sel[TabMail] = clampSel(m.sel[TabMail], m.rowCount(TabMail))
-	return m
+	return m, nil
 }
 
 func (m Model) searchKey(k tea.KeyPressMsg) Model {
@@ -250,7 +313,9 @@ func (m Model) searchKey(k tea.KeyPressMsg) Model {
 			m.mail.query += clean(k.Text)
 		}
 	}
+	m.mail.cycleID = ""
 	m.sel[TabMail] = clampSel(m.sel[TabMail], m.rowCount(TabMail))
+	m.scroll[TabMail] = 0
 	return m
 }
 
@@ -281,9 +346,4 @@ func (m *Model) graphKey(s string) {
 			m.graphAt = ""
 		}
 	}
-}
-
-// matches reports whether subject holds the search query, ignoring case.
-func matches(subject, query string) bool {
-	return query == "" || strings.Contains(strings.ToLower(subject), strings.ToLower(query))
 }
