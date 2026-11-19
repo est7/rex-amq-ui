@@ -192,7 +192,7 @@ local function view(active, windows)
     w.layers[1] = tiled
     for _, f in ipairs(spec.floating or {}) do
       w.layers[#w.layers + 1] = { layer_id = f.id, kind = "floating", state = f.state,
-        bounds = f.bounds or { 0.64, 0.02, 0.35, 0.96 }, blocks = { { block_id = f.block, label = f.label or "rex-amq-ui" } } }
+        bounds = f.bounds or { 0.57, 0.02, 0.42, 0.96 }, blocks = { { block_id = f.block, label = f.label or "rex-amq-ui" } } }
     end
     v.windows[#v.windows + 1] = w
   end
@@ -295,14 +295,15 @@ do -- minimized: normal with focus, then resume
   check("restored result", w.result.action == "restored", show(w.result))
 end
 
-do -- up but another pane has focus: focus it rather than hide it
+do -- up in active tab, even when another pane has focus: hide it in one keypress
   local w = toggle({ calls = { ["session.view"] = view("w1", {
     { id = "w1", focused = "block:a", tiled = { "block:a" }, floating = { { id = "layer:p", block = "block:p" } } } }) } })
-  same("toggle focuses an unfocused panel", w, {
+  same("toggle hides a visible unfocused panel in one keypress", w, {
     "session.view ",
-    "session.set_layer_state focus=true layer_id=\"layer:p\" state=\"normal\"",
-    "write block:p " .. q(RESUME),
+    "write block:p " .. q(PAUSE),
+    "session.set_layer_state layer_id=\"layer:p\" state=\"minimized\"",
   })
+  check("hidden unfocused result", w.result.action == "minimized", show(w.result))
 end
 
 do -- in another tab: move it here at its size, float it, show it
@@ -357,7 +358,7 @@ do -- a panel block in a layout (a move broke off there) is floated again, not o
     exec = function() return ran('{"layer_id":"layer:new","block_id":"block:p"}') end })
   same("a panel left in the active tab's layout is floated in place", w, {
     "session.view ",
-    "session.float_block block_id=\"block:t\" bounds={1=0.64,2=0.02,3=0.35,4=0.96}",
+    "session.float_block block_id=\"block:t\" bounds={1=0.57,2=0.02,3=0.42,4=0.96}",
     "session.set_layer_state focus=true layer_id=\"layer:t\" state=\"normal\"",
     "write block:t " .. q(RESUME),
   })
@@ -574,7 +575,7 @@ do -- several wait, the panel is in another tab: bring it over on Overview
     "exec " .. BIN .. " waiting --json --session " .. S,
     "session.view ",
     "session.move_block anchor_block_id=\"block:b\" block_id=\"block:p\"",
-    "session.float_block block_id=\"block:p\" bounds={1=0.64,2=0.02,3=0.35,4=0.96}",
+    "session.float_block block_id=\"block:p\" bounds={1=0.57,2=0.02,3=0.42,4=0.96}",
     "session.set_layer_state focus=true layer_id=\"layer:q\" state=\"normal\"",
     "write block:p " .. q(RESUME .. OVERVIEW),
   })
@@ -672,7 +673,7 @@ do -- moved into the layout, the float refused: the next toggle repairs it, neve
   for i = n + 1, #w.seq do after[#after + 1] = steps(w)[i] end
   local want = {
     "session.view ",
-    "session.float_block block_id=\"block:p\" bounds={1=0.64,2=0.02,3=0.35,4=0.96}",
+    "session.float_block block_id=\"block:p\" bounds={1=0.57,2=0.02,3=0.42,4=0.96}",
     "session.set_layer_state focus=true layer_id=\"layer:q\" state=\"normal\"",
     "write block:p " .. q(RESUME),
   }
@@ -699,7 +700,7 @@ end
 do -- a stranded panel with focus is floated again, never "minimized" (a layout cannot be)
   local v = view("w1", { { id = "w1", focused = "block:t", tiled = { "block:a", "block:t" }, labels = { ["block:t"] = "rex-amq-ui" } } })
   local w = toggle({ calls = { ["session.view"] = v, ["session.float_block"] = { layer_id = "layer:t", revision = 4 } } })
-  check("focused stranded panel is floated, not hidden", steps(w)[2] == "session.float_block block_id=\"block:t\" bounds={1=0.64,2=0.02,3=0.35,4=0.96}"
+  check("focused stranded panel is floated, not hidden", steps(w)[2] == "session.float_block block_id=\"block:t\" bounds={1=0.57,2=0.02,3=0.42,4=0.96}"
     and w.result.action == "moved", steps(w)[2])
 end
 
