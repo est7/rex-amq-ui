@@ -251,13 +251,16 @@ type streamReq struct {
 // streamManager owns the panel's active adapter.Stream and handles live
 // session switches: Switch cancels the running child stream and wakes the
 // supervisor, which waits for the previous adapter process to exit before
-// starting the next session's stream. Every update delivered to prog is
+// starting the next session's stream. Generations are monotonic; Switch
+// ignores requests at or below maxGen so asynchronous tea.Cmds executed out of
+// order cannot replace a newer subscription. Every update delivered to prog is
 // tagged with its subscription generation so late updates from a cancelled
 // stream are dropped by ui.Model.
 type streamManager struct {
 	bin string
 
 	mu     sync.Mutex
+	maxGen uint64
 	next   *streamReq
 	cancel context.CancelFunc
 	wake   chan struct{}
@@ -265,9 +268,10 @@ type streamManager struct {
 
 func newStreamManager(bin, initialSession string) *streamManager {
 	m := &streamManager{
-		bin:  bin,
-		next: &streamReq{session: initialSession, gen: 0},
-		wake: make(chan struct{}, 1),
+		bin:    bin,
+		maxGen: 0,
+		next:   &streamReq{session: initialSession, gen: 0},
+		wake:   make(chan struct{}, 1),
 	}
 	m.wake <- struct{}{}
 	return m
@@ -275,6 +279,11 @@ func newStreamManager(bin, initialSession string) *streamManager {
 
 func (m *streamManager) Switch(session string, gen uint64) {
 	m.mu.Lock()
+	if gen <= m.maxGen {
+		m.mu.Unlock()
+		return
+	}
+	m.maxGen = gen
 	m.next = &streamReq{session: session, gen: gen}
 	cancel := m.cancel
 	m.mu.Unlock()
@@ -293,10 +302,7 @@ func (m *streamManager) run(ctx context.Context, prog *tea.Program) {
 		var err error
 		if bin, err = adapter.ResolveBin(); err != nil {
 			m.mu.Lock()
-			gen := uint64(0)
-			if m.next != nil {
-				gen = m.next.gen
-			}
+			gen := m.maxGen
 			m.mu.Unlock()
 			prog.Send(ui.StreamUpdate{Gen: gen, Update: adapter.StatusUpdate{Status: adapter.Reconnecting, Err: err}})
 			return
