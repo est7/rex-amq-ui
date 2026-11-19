@@ -176,7 +176,7 @@ func TestStreamConnectsOnSnapshotAndForwardsFramesInOrder(t *testing.T) {
 	h := newHarness(t, &Stream{Bin: "/x/rex-amq-adapter", Session: "session:x", Env: []string{"PATH=/fake"}})
 	h.status(Connecting)
 	p := h.proc()
-	if want := []string{"/x/rex-amq-adapter", "panel", "--json", "--session", "session:x"}; !slices.Equal(p.args, want) || !slices.Equal(p.env, []string{"PATH=/fake"}) {
+	if want := []string{"/x/rex-amq-adapter", "stream", "panel", "--session", "session:x"}; !slices.Equal(p.args, want) || !slices.Equal(p.env, []string{"PATH=/fake"}) {
 		t.Fatalf("run %v env %v", p.args, p.env)
 	}
 	p.write(t, snapshotLine("s1", "epic"))
@@ -339,9 +339,156 @@ func TestStreamCancelledDuringBackoffReturns(t *testing.T) {
 	h.noProc()
 }
 
-func TestStreamArgsWithoutSession(t *testing.T) {
-	if got := (&Stream{}).Args(); !slices.Equal(got, []string{"panel", "--json"}) {
+// The adapter's v2 command for the human's panel, with and without a
+// session.
+func TestStreamPanelArgv(t *testing.T) {
+	if got := (&Stream{}).Args(); !slices.Equal(got, []string{"stream", "panel"}) {
 		t.Fatal(got)
+	}
+	if got := (&Stream{Session: "session:x"}).Args(); !slices.Equal(got, []string{"stream", "panel", "--session", "session:x"}) {
+		t.Fatal(got)
+	}
+}
+
+// envelopeAdapter writes an adapter that prints the recorded envelope
+// fixture (testdata/envelope, from rex-amq-adapter stream panel) and exits
+// with code, as the v2 adapter does when it refuses a run before connecting.
+func envelopeAdapter(t *testing.T, fixture string, code int) string {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("..", "..", "testdata", "envelope", fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "rex-amq-adapter")
+	body := fmt.Sprintf("#!/bin/sh\ncat '%s'\nexit %d\n", abs, code)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// firstEnd runs s until its first run ends and returns that Reconnecting or
+// Refused.
+func firstEnd(t *testing.T, s *Stream) StatusUpdate {
+	t.Helper()
+	out := make(chan Update, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, out) }()
+	defer func() { cancel(); <-done }()
+	for {
+		select {
+		case u := <-out:
+			switch u := u.(type) {
+			case StatusUpdate:
+				if u.Status == Reconnecting || u.Status == Refused {
+					return u
+				}
+				if u.Status == Connected {
+					t.Fatal("a refused run connected")
+				}
+			case FrameUpdate:
+				t.Fatalf("a refused run sent a frame: %#v", u.Frame)
+			}
+		case <-time.After(wait):
+			t.Fatal("the run did not end")
+		}
+	}
+}
+
+// A run the adapter's guard refuses before connecting (exit 6, recorded
+// from an agent's pane) ends with the envelope's code, message, and next
+// action, not as a frame of an unsupported schema.
+func TestPreConnectEnvelope(t *testing.T) {
+	u := firstEnd(t, &Stream{Bin: envelopeAdapter(t, "recorded-guard-denied.ndjson", 6), Env: []string{"PATH=/usr/bin:/bin"}})
+	if u.Status != Refused {
+		t.Fatalf("status %v, want refused", u.Status)
+	}
+	var refusal *EnvelopeError
+	if !errors.As(u.Err, &refusal) {
+		t.Fatalf("ended with %v, want an *EnvelopeError", u.Err)
+	}
+	if refusal.Code != "guard_denied" || !strings.Contains(refusal.Message, "this command is the human's") || refusal.NextAction != "" || refusal.Retryable {
+		t.Fatalf("refusal %+v", refusal)
+	}
+	if errors.Is(u.Err, ErrSchema) {
+		t.Fatalf("the refusal was read as a frame: %v", u.Err)
+	}
+	if msg := u.Err.Error(); !strings.Contains(msg, "guard_denied") || !strings.Contains(msg, "this command is the human's") {
+		t.Fatalf("status text %q", msg)
+	}
+}
+
+// A usage error before connecting (exit 2) carries its next action, the
+// command the adapter suggests, into the status.
+func TestPreConnectUsage(t *testing.T) {
+	u := firstEnd(t, &Stream{Bin: envelopeAdapter(t, "recorded-usage.ndjson", 2), Env: []string{"PATH=/usr/bin:/bin"}})
+	if u.Status != Refused {
+		t.Fatalf("status %v, want refused", u.Status)
+	}
+	var refusal *EnvelopeError
+	if !errors.As(u.Err, &refusal) {
+		t.Fatalf("ended with %v, want an *EnvelopeError", u.Err)
+	}
+	const next = "rex-amq-adapter stream panel --help"
+	if refusal.Code != "usage" || refusal.Message != "unknown flag --bogus" || refusal.NextAction != next {
+		t.Fatalf("refusal %+v", refusal)
+	}
+	if msg := u.Err.Error(); !strings.Contains(msg, "usage: unknown flag --bogus") || !strings.Contains(msg, next) {
+		t.Fatalf("status text %q", msg)
+	}
+}
+
+// A failure envelope with no error code is not taken for a refusal it
+// cannot name.
+func TestPreConnectMalformedEnvelope(t *testing.T) {
+	h := newHarness(t, &Stream{Bin: "a"})
+	h.status(Connecting)
+	p := h.proc()
+	go io.WriteString(p.w, `{"ok":false,"v":2,"data":null}`+"\n")
+	u := h.status(Reconnecting)
+	var refusal *EnvelopeError
+	if !errors.Is(u.Err, errEnvelopeMalformed) || errors.As(u.Err, &refusal) {
+		t.Fatalf("ended with %v", u.Err)
+	}
+}
+
+// A run that connected and then lost its adapter ends with the exit status,
+// and the next run's snapshot connects again.
+func TestStreamDisconnectAfterConnecting(t *testing.T) {
+	h := newHarness(t, &Stream{Bin: "a"})
+	h.status(Connecting)
+	p := h.proc()
+	p.write(t, snapshotLine("s1", "x"))
+	h.status(Connected)
+	h.frame()
+	p.exit(errors.New("exit status 1: rex: connection refused"))
+	u := h.status(Reconnecting)
+	var refusal *EnvelopeError
+	if u.Err == nil || errors.As(u.Err, &refusal) || !strings.Contains(u.Err.Error(), "connection refused") {
+		t.Fatalf("ended with %v", u.Err)
+	}
+	h.timer().ch <- time.Now()
+	p = h.proc()
+	p.write(t, snapshotLine("s2", "x"))
+	h.status(Connected)
+}
+
+// After the snapshot, the stream is frames only: an envelope-shaped line is
+// a frame that does not decode (schema 0), and the run is restarted as for
+// any malformed frame.
+func TestStreamEnvelopeAfterConnectingIsAMalformedFrame(t *testing.T) {
+	h := newHarness(t, &Stream{Bin: "a"})
+	h.status(Connecting)
+	p := h.proc()
+	p.write(t, snapshotLine("s1", "x"))
+	h.status(Connected)
+	h.frame()
+	go io.WriteString(p.w, `{"ok":false,"v":2,"data":null,"error":{"code":"internal","message":"x"}}`+"\n")
+	u := h.status(Reconnecting)
+	var refusal *EnvelopeError
+	if !errors.Is(u.Err, ErrSchema) || errors.As(u.Err, &refusal) {
+		t.Fatalf("ended with %v", u.Err)
 	}
 }
 
@@ -357,7 +504,7 @@ func TestStreamRunsARealProcess(t *testing.T) {
 	}
 	script := filepath.Join(dir, "rex-amq-adapter")
 	body := "#!/bin/sh\n" +
-		"[ \"$1 $2\" = \"panel --json\" ] || { echo \"usage: rex-amq-adapter <command>\" >&2; exit 2; }\n" +
+		"[ \"$1 $2\" = \"stream panel\" ] || { echo \"usage: rex-amq-adapter <command>\" >&2; exit 2; }\n" +
 		"head -n 1 '" + abs + "'\n" +
 		"trap 'exit 0' TERM\n" +
 		"while :; do sleep 0.1; done\n"
@@ -413,4 +560,64 @@ func TestStreamRunsARealProcess(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A refusal the adapter marks retryable:false (both recorded fixtures) is
+// final: Run reports it as Refused and returns, and starts no other run with
+// the same arguments (spec §3.4: a usage error is not retried unchanged).
+func TestPreConnectRefusalIsNotRetried(t *testing.T) {
+	for _, fixture := range []string{"recorded-guard-denied.ndjson", "recorded-usage.ndjson"} {
+		t.Run(fixture, func(t *testing.T) {
+			line, err := os.ReadFile(filepath.Join("..", "..", "testdata", "envelope", fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, &Stream{Bin: "a"})
+			h.status(Connecting)
+			p := h.proc()
+			go func() {
+				io.WriteString(p.w, string(line))
+				p.exit(errors.New("exit status 6"))
+			}()
+			u := h.status(Refused)
+			var refusal *EnvelopeError
+			if !errors.As(u.Err, &refusal) || refusal.Retryable || u.RetryIn != 0 {
+				t.Fatalf("refused with %#v", u)
+			}
+			select {
+			case err := <-h.done:
+				if err != nil {
+					t.Fatalf("Run returned %v", err)
+				}
+				h.done <- nil // for the cleanup
+			case <-time.After(wait):
+				t.Fatal("Run kept going after a final refusal")
+			}
+			select {
+			case tm := <-h.timers:
+				t.Fatalf("a backoff of %v started", tm.d)
+			default:
+			}
+			h.noProc()
+		})
+	}
+}
+
+// A refusal marked retryable:true is retried after a backoff, like any run
+// that ended.
+func TestPreConnectRetryableRefusalIsRetried(t *testing.T) {
+	h := newHarness(t, &Stream{Bin: "a"})
+	h.status(Connecting)
+	p := h.proc()
+	go func() {
+		io.WriteString(p.w, `{"ok":false,"v":2,"data":null,"error":{"code":"rex_unavailable","message":"rex is not running","retryable":true,"next_action":null}}`+"\n")
+		p.exit(errors.New("exit status 1"))
+	}()
+	u := h.status(Reconnecting)
+	var refusal *EnvelopeError
+	if !errors.As(u.Err, &refusal) || refusal.Code != "rex_unavailable" || !refusal.Retryable || u.RetryIn == 0 {
+		t.Fatalf("reconnecting with %#v", u)
+	}
+	h.timer().ch <- time.Now()
+	h.proc()
 }

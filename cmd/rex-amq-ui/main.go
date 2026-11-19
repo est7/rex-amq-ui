@@ -1,5 +1,5 @@
 // Command rex-amq-ui is the human's floating Crew and Cockpit panel for a Rex
-// session. It reads `rex-amq-adapter panel --json` and drives its own
+// session. It reads `rex-amq-adapter stream panel` and drives its own
 // floating layer over Rex's control API.
 //
 //	rex-amq-ui [--session S] [--adapter-bin P] [--focus B] [--tab T] [--board]

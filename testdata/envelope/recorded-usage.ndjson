@@ -1,0 +1,1 @@
+{"ok":false,"v":2,"data":null,"error":{"code":"usage","message":"unknown flag --bogus","retryable":false,"hint":"run `rex-amq-adapter stream panel --help`","next_action":"rex-amq-adapter stream panel --help","details":{}},"meta":{"verb":"stream panel"},"warnings":[]}

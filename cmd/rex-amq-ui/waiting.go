@@ -95,7 +95,7 @@ func firstSnapshot(ctx context.Context, s *adapter.Stream, timeout time.Duration
 					return snap, nil
 				}
 			case adapter.StatusUpdate:
-				if u.Status == adapter.Reconnecting {
+				if u.Status == adapter.Reconnecting || u.Status == adapter.Refused {
 					if u.Err == nil {
 						return adapter.Snapshot{}, adapter.ErrStreamEnded
 					}

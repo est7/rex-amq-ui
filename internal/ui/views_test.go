@@ -243,6 +243,12 @@ func TestViewMapping(t *testing.T) {
 		if f := fresh.Frame(); !contains(f, "Waiting for rex-amq-adapter") || !contains(f, "not found") {
 			t.Fatalf("\n%s", plain(f))
 		}
+		refused := New(Deps{Clock: fixtures["recorded-bare"]}, Options{})
+		refused = step(t, refused, tea.WindowSizeMsg{Width: w, Height: h})
+		refused = step(t, refused, adapter.StatusUpdate{Status: adapter.Refused, Err: &adapter.EnvelopeError{Code: "guard_denied", Message: "this command is the human's"}})
+		if f := refused.Frame(); !strings.Contains(lines(f)[0], "✕ Refused") || !contains(f, "guard_denied: this command is the human's") || contains(f, "retrying in") {
+			t.Fatalf("\n%s", plain(f))
+		}
 	})
 	t.Run("graph region and replay bar", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "graph"})

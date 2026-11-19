@@ -25,6 +25,9 @@ const (
 	// Reconnecting: the last run ended or failed; another starts after a
 	// backoff. The State folded so far is still the last thing known.
 	Reconnecting
+	// Refused: the adapter refused the run before connecting and said a
+	// retry would not help (retryable:false); no other run starts. Final.
+	Refused
 )
 
 func (s Status) String() string {
@@ -35,6 +38,8 @@ func (s Status) String() string {
 		return "connected"
 	case Reconnecting:
 		return "reconnecting"
+	case Refused:
+		return "refused"
 	}
 	return fmt.Sprintf("status(%d)", int(s))
 }
@@ -47,8 +52,11 @@ type Update interface{ isUpdate() }
 type FrameUpdate struct{ Frame Frame }
 
 // StatusUpdate is a change of the stream's status. Err says why a run ended
-// (with the adapter's exit status and the tail of its stderr), and RetryIn
-// how long until the next one starts; both are set only for Reconnecting.
+// (set for Reconnecting and Refused), and RetryIn how long until the next
+// one starts (Reconnecting only). A run the adapter refused before
+// connecting ends with an *EnvelopeError (its code, message, and next
+// action); any other ends with the adapter's exit status and the tail of
+// its stderr.
 type StatusUpdate struct {
 	Status  Status
 	Err     error
@@ -69,7 +77,7 @@ const (
 // exits 0 on it) before it is killed.
 const StopGrace = 2 * time.Second
 
-// Stream runs `<Bin> panel --json [--session Session]` and keeps it running.
+// Stream runs `<Bin> stream panel [--session Session]` and keeps it running.
 type Stream struct {
 	// Bin is the adapter binary (ResolveBin).
 	Bin string
@@ -99,7 +107,7 @@ type process interface {
 
 // Args are the adapter's arguments.
 func (s *Stream) Args() []string {
-	args := []string{"panel", "--json"}
+	args := []string{"stream", "panel"}
 	if s.Session != "" {
 		args = append(args, "--session", s.Session)
 	}
@@ -118,7 +126,10 @@ var ErrGap = errors.New("adapter: frame out of order")
 // ends; then it stops the current run and returns nil. A run that exits,
 // fails to start, writes a line that does not decode, or skips a frame is
 // stopped and restarted after a backoff, and its replacement's snapshot
-// resynchronizes the State. Run blocks on out.
+// resynchronizes the State. A run the adapter refuses before connecting
+// ends the stream instead when the refusal says a retry would not help
+// (retryable:false): it arrives as Refused, and Run returns. Run blocks on
+// out.
 func (s *Stream) Run(ctx context.Context, out chan<- Update) error {
 	start, after := s.start, s.after
 	if start == nil {
@@ -151,6 +162,10 @@ func (s *Stream) Run(ctx context.Context, out chan<- Update) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if final(err) {
+			send(StatusUpdate{Status: Refused, Err: err})
+			return nil
+		}
 		if connected {
 			backoff = minB
 		}
@@ -164,6 +179,14 @@ func (s *Stream) Run(ctx context.Context, out chan<- Update) error {
 		}
 		backoff = min(backoff*2, maxB)
 	}
+}
+
+// final reports whether a run's error ends the stream: the adapter refused
+// the run before connecting and said another one with the same arguments
+// would not help.
+func final(err error) bool {
+	var refusal *EnvelopeError
+	return errors.As(err, &refusal) && !refusal.Retryable
 }
 
 // runOnce is one adapter run, from its start to its end: whether it reached
@@ -192,7 +215,9 @@ func (s *Stream) runOnce(ctx context.Context, start func(context.Context, string
 
 // follow reads one run's frames and sends them on, until its output ends
 // (io.EOF), a line does not decode, a frame is out of order, or send fails.
-// It sends Connected before the run's snapshot.
+// It sends Connected before the run's snapshot. Before that snapshot, a
+// failure envelope ends the run with its *EnvelopeError; after it, the same
+// line is a frame that does not decode.
 func follow(r io.Reader, send func(Update) bool) (connected bool, err error) {
 	// Not bufio.Scanner: a snapshot carries a hand-back whole, and a line
 	// has no bound.
@@ -202,6 +227,14 @@ func follow(r io.Reader, send func(Update) bool) (connected bool, err error) {
 	for {
 		line, readErr := br.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 {
+			if stream == "" {
+				if refusal, ok, err := decodeEnvelope(line); ok {
+					if err != nil {
+						return connected, err
+					}
+					return connected, refusal
+				}
+			}
 			f, err := DecodeFrame(line)
 			if err != nil {
 				return connected, err

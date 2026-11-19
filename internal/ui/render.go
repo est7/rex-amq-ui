@@ -77,6 +77,8 @@ func (m Model) header(c *canvas) {
 	switch {
 	case m.st.Ready() && m.status.Status == adapter.Connected:
 		live = Span{Text: "● Live", Fg: p.Green}
+	case m.status.Status == adapter.Refused:
+		live = Span{Text: "✕ Refused", Fg: p.Red}
 	case m.status.Status == adapter.Reconnecting:
 		live = Span{Text: "◌ Reconnecting", Fg: p.Yellow}
 	default:
