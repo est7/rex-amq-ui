@@ -2,12 +2,14 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/est7/rex-amq-ui/internal/adapter"
 	"github.com/est7/rex-amq-ui/internal/apc"
 	"github.com/est7/rex-amq-ui/internal/layer"
 )
@@ -246,15 +248,16 @@ func TestMouseListClickAndDoubleClick(t *testing.T) {
 		}
 		es = m.overviewEntries()
 		firstHB, _ := rowBounds(es, hbRow)
-		start := listStart(es, m.sel[TabOverview], m.scroll[TabOverview], m.contentHeight())
+		start := m.viewStart(TabOverview, es, m.contentHeight())
 		yHB := borderWidth + headerLines + (firstHB - start)
 		m = sendMsg(t, m, leftClick(5, yHB))
 		if m.sel[TabOverview] != hbRow || len(opened) != 0 {
 			t.Fatalf("first click on hand-back: sel=%d want %d, opened=%v", m.sel[TabOverview], hbRow, opened)
 		}
-		// Recompute yHB after selection moved (listStart may re-center).
-		start = listStart(es, m.sel[TabOverview], m.scroll[TabOverview], m.contentHeight())
-		yHB = borderWidth + headerLines + (firstHB - start)
+		if gotStart := m.viewStart(TabOverview, m.overviewEntries(), m.contentHeight()); gotStart != start {
+			t.Fatalf("single click shifted viewport start from %d to %d", start, gotStart)
+		}
+		// Second click at the EXACT SAME screen coordinates (5, yHB) opens hand-back.
 		now = now.Add(100 * time.Millisecond)
 		m = sendMsg(t, m, leftClick(5, yHB))
 		if len(opened) != 1 || !strings.Contains(opened[0], "hand-back-1.md") {
@@ -330,5 +333,84 @@ func TestMouseModeTransitionsAndKittyPixelTabClick(t *testing.T) {
 	}
 	if got := r.m.View().MouseMode; got != tea.MouseModeCellMotion {
 		t.Fatalf("after leaving Kitty Graph MouseMode = %v, want MouseModeCellMotion", got)
+	}
+}
+
+func TestMouseSamePointDoubleClickInScrolledList(t *testing.T) {
+	now := time.Date(2026, 11, 16, 9, 30, 0, 0, time.UTC)
+	msgs := make([]adapter.Message, 20)
+	act := make([]adapter.ViewMessage, 20)
+	for i := range 20 {
+		id := fmt.Sprintf("m-%02d", i)
+		ts := now.Add(time.Duration(i-20) * time.Minute)
+		msgs[i] = adapter.Message{
+			ID:        id,
+			From:      "claude-01",
+			To:        []string{"claude-02"},
+			Subject:   fmt.Sprintf("subject-%02d", i),
+			State:     adapter.MsgDrained,
+			CreatedAt: ts,
+		}
+		act[i] = adapter.ViewMessage{
+			Ref:     id,
+			From:    "claude-01",
+			To:      []string{"claude-02"},
+			Subject: msgs[i].Subject,
+			Body:    fmt.Sprintf("excerpt-body-%02d", i),
+		}
+	}
+	snap := adapter.Snapshot{
+		Header:   adapter.Header{Schema: 1, Stream: "mail-scroll", Seq: 1, Type: "snapshot", At: now},
+		Scope:    adapter.Scope{Kind: "session", SessionID: "session:m"},
+		Messages: msgs,
+		Panel: &adapter.Panel{
+			SessionLabel: "mail-scroll",
+			View:         &adapter.SessionView{Activity: act},
+		},
+	}
+
+	m := New(Deps{Clock: movingClock{&now}}, Options{Tab: "mail"})
+	m = step(t, m, tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = step(t, m, adapter.StatusUpdate{Status: adapter.Connected})
+	m = step(t, m, adapter.FrameUpdate{Frame: snap})
+
+	// 80x12 panel -> innerH=10, contentHeight=7, Mail list height=6, top=4.
+	// Follow starts on row 19 with visible window [14..19].
+	es, top, height := m.clickableList()
+	if top != 4 || height != 6 {
+		t.Fatalf("mail list geometry top=%d height=%d, want 4 6", top, height)
+	}
+	if m.sel[TabMail] != 19 || m.viewStart(TabMail, es, height) != 14 {
+		t.Fatalf("initial mail state sel=%d viewStart=%d, want 19 14", m.sel[TabMail], m.viewStart(TabMail, es, height))
+	}
+
+	// Single click at (5, 4) selects row 14 and pins viewport start at 14 so
+	// row 14 stays directly under the cursor without jumping.
+	m = sendMsg(t, m, leftClick(5, 4))
+	if m.sel[TabMail] != 14 || m.mail.follow {
+		t.Fatalf("after first click: sel=%d follow=%v, want 14 false", m.sel[TabMail], m.mail.follow)
+	}
+	if gotStart := m.viewStart(TabMail, m.mailEntries(), height); gotStart != 14 {
+		t.Fatalf("single click shifted viewStart to %d, want 14", gotStart)
+	}
+	if line4 := lines(m.Frame())[4]; !strings.Contains(line4, "subject-14") {
+		t.Fatalf("row 14 moved away from screen line 4: %q", line4)
+	}
+
+	// Second click at the EXACT SAME point (5, 4) 150ms later expands row 14's
+	// excerpt and unpins the viewport so the expanded body is brought into view.
+	now = now.Add(150 * time.Millisecond)
+	m = sendMsg(t, m, leftClick(5, 4))
+	if !m.mail.expanded["m-14"] {
+		t.Fatalf("same-point double-click did not expand m-14 (expanded=%v sel=%d)", m.mail.expanded, m.sel[TabMail])
+	}
+	if _, pinned := m.pin[TabMail]; pinned {
+		t.Fatal("pin was not cleared on double-click")
+	}
+	if f := plain(m.Frame()); !strings.Contains(f, "excerpt-body-14") {
+		t.Fatalf("expanded excerpt-body-14 not visible after double-click:\n%s", f)
+	}
+	if bad := holes(m.Frame(), 80, 12); bad != nil {
+		t.Fatalf("holes after same-point double-click: %v", bad)
 	}
 }

@@ -324,7 +324,7 @@ func (m Model) renderGraphTUI(c *canvas, regH int) {
 		sub.blank()
 		sub.add(Span{Text: " No agents in this session.", Fg: p.Faint, Italic: true})
 	} else {
-		list(sub, es, m.sel[TabGraph], m.scroll[TabGraph])
+		m.drawList(sub, TabGraph, es)
 	}
 	for _, r := range sub.rows() {
 		if !c.full() {

@@ -101,7 +101,7 @@ func (m Model) mouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		m.lastClick = clickState{}
 		return m, nil
 	}
-	start := listStart(es, m.sel[m.tab], m.scroll[m.tab], height)
+	start := m.viewStart(m.tab, es, height)
 	idx := start + (cy - top)
 	if idx < 0 || idx >= len(es) || es[idx].row < 0 {
 		m.lastClick = clickState{}
@@ -134,9 +134,11 @@ func (m Model) mouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	now := m.now()
 	if !m.lastClick.at.IsZero() && m.lastClick.tab == m.tab && m.lastClick.row == row &&
 		now.Sub(m.lastClick.at) >= 0 && now.Sub(m.lastClick.at) <= doubleClickWindow {
+		m.clearPin(m.tab)
 		m.lastClick = clickState{}
 		return m.enter()
 	}
+	m.setPin(m.tab, start)
 	m.lastClick = clickState{tab: m.tab, row: row, at: now}
 	return m, nil
 }

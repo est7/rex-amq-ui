@@ -155,6 +155,7 @@ type Model struct {
 
 	sel       map[Tab]int
 	scroll    map[Tab]int
+	pin       map[Tab]int // pinned viewport start after a mouse click so double-click hits the same row
 	lastClick clickState
 	retired   bool // the Retired group is open
 	// owed is when each open obligation was first seen (owedSince).
@@ -197,7 +198,7 @@ func New(d Deps, o Options) Model {
 	if d.Clock == nil {
 		d.Clock = SystemClock{}
 	}
-	m := Model{deps: d, session: o.Session, pal: theme.Default(), size: o.Size, sel: map[Tab]int{}, scroll: map[Tab]int{},
+	m := Model{deps: d, session: o.Session, pal: theme.Default(), size: o.Size, sel: map[Tab]int{}, scroll: map[Tab]int{}, pin: map[Tab]int{},
 		mail: mailState{follow: true, expanded: map[string]bool{}}}
 	m.lay.Focused = o.Focused
 	m.lay.Size = o.Size
@@ -330,6 +331,7 @@ func (m *Model) settle() {
 		if m.sel[TabMail] != last {
 			m.sel[TabMail] = last
 			m.scroll[TabMail] = 0
+			m.clearPin(TabMail)
 		}
 	}
 	for _, t := range tabs {
@@ -337,6 +339,7 @@ func (m *Model) settle() {
 		m.sel[t] = clampSel(m.sel[t], m.rowCount(t))
 		if m.sel[t] != prev {
 			m.scroll[t] = 0
+			m.clearPin(t)
 		} else {
 			m.scroll[t] = min(max(m.scroll[t], 0), m.maxScroll(t, m.sel[t]))
 		}
@@ -347,6 +350,19 @@ func (m *Model) settle() {
 }
 
 func clampSel(i, n int) int { return max(0, min(i, n-1)) }
+
+func (m *Model) setPin(t Tab, start int) {
+	if m.pin == nil {
+		m.pin = map[Tab]int{}
+	}
+	m.pin[t] = start
+}
+
+func (m *Model) clearPin(t Tab) {
+	if m.pin != nil {
+		delete(m.pin, t)
+	}
+}
 
 func (m Model) personal() bool { return m.st.Panel != nil && m.st.Panel.Personal() }
 
@@ -393,6 +409,7 @@ func (m Model) drillDown() (Model, tea.Cmd) {
 	m.hint, m.hintBad = "", false
 	m.sel = map[Tab]int{}
 	m.scroll = map[Tab]int{}
+	m.pin = map[Tab]int{}
 	m.lastClick = clickState{}
 	m.retired = false
 	m.owed = nil
@@ -420,6 +437,7 @@ func (m Model) popBack() (Model, tea.Cmd) {
 	m.hint, m.hintBad = "", false
 	m.sel = map[Tab]int{TabEpics: d.hubSel}
 	m.scroll = map[Tab]int{}
+	m.pin = map[Tab]int{}
 	m.lastClick = clickState{}
 	m.retired = false
 	m.owed = nil

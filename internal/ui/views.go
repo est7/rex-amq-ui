@@ -52,11 +52,25 @@ func listStart(es []entry, sel, off, height int) int {
 	return start
 }
 
-// list draws entries into c, scrolled to show the selected row: centred
-// when it fits in the viewport, or scrolled line-by-line by off when the
-// selected row is taller than the viewport.
-func list(c *canvas, es []entry, sel, off int) {
-	start := listStart(es, sel, off, c.left())
+// viewStart is the first visible entry index for tab t at viewport height,
+// shared between list rendering and mouse click hit-testing. When a mouse
+// click pinned the viewport, it keeps that start as long as the selected row
+// still overlaps the visible window so a physical double-click at the same
+// screen coordinates hits the same row.
+func (m Model) viewStart(t Tab, es []entry, height int) int {
+	if pin, ok := m.pin[t]; ok && height > 0 && len(es) > height {
+		pin = min(max(pin, 0), len(es)-height)
+		first, last := rowBounds(es, m.sel[t])
+		if first >= 0 && last >= pin && first < pin+height {
+			return pin
+		}
+	}
+	return listStart(es, m.sel[t], m.scroll[t], height)
+}
+
+// drawList draws entries into c starting at m.viewStart(t, es, c.left()).
+func (m Model) drawList(c *canvas, t Tab, es []entry) {
+	start := m.viewStart(t, es, c.left())
 	for _, e := range es[start:] {
 		if c.full() {
 			return
@@ -111,7 +125,7 @@ func capsule(text string, fg, bg color.Color) Span {
 // overview lists the alerts, one row each, then the narrator, the
 // lifecycle, and the hand-back, a row per section, so j/k and G scroll
 // through all of it.
-func (m Model) overview(c *canvas) { list(c, m.overviewEntries(), m.sel[TabOverview], m.scroll[TabOverview]) }
+func (m Model) overview(c *canvas) { m.drawList(c, TabOverview, m.overviewEntries()) }
 
 // overviewSections are the rows below the alerts: narrator, then the
 // lifecycle and hand-back when the view has them.
@@ -319,7 +333,7 @@ func (m Model) membersView(c *canvas) {
 		c.add(Span{Text: " No agents in this session.", Fg: p.Faint, Italic: true})
 		return
 	}
-	list(c, m.memberEntries(), m.sel[TabMembers], m.scroll[TabMembers])
+	m.drawList(c, TabMembers, m.memberEntries())
 }
 
 func memberDisplayName(a adapter.Agent) string {
@@ -611,7 +625,7 @@ func (m Model) mailView(c *canvas) {
 		c.add(Span{Text: " No messages.", Fg: p.Faint, Italic: true})
 		return
 	}
-	list(c, es, m.sel[TabMail], m.scroll[TabMail])
+	m.drawList(c, TabMail, es)
 }
 
 func (m Model) mailCapsule(msg adapter.Message) Span {
@@ -741,5 +755,5 @@ func (m Model) epicsView(c *canvas) {
 		c.add(Span{Text: " No Epics are linked to this personal agent yet.", Fg: p.Faint, Italic: true})
 		return
 	}
-	list(c, m.epicsEntries(), m.sel[TabEpics], m.scroll[TabEpics])
+	m.drawList(c, TabEpics, m.epicsEntries())
 }
