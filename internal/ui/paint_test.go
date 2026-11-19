@@ -39,3 +39,23 @@ func TestLineLRKeepsRightSide(t *testing.T) {
 		t.Fatalf("right side lost or left not cut: %q", got)
 	}
 }
+
+func TestFrameCanvasOpaqueAtEverySize(t *testing.T) {
+	p := theme.Default()
+	for _, w := range []int{0, 1, 2, 3, 8, 40} {
+		for _, h := range []int{0, 1, 2, 3, 6} {
+			inner := newCanvas(max(w-2, 0), max(h-2, 0), p.Bg)
+			inner.add(Span{Text: "hello 界", Fg: p.Fg})
+			frame := frameCanvas(w, h, p.Bg, p.Faint, inner)
+			if bad := holes(frame, w, h); bad != nil {
+				t.Errorf("%dx%d: %v", w, h, bad)
+			}
+			if w >= 2 && h >= 2 {
+				ls := strings.Split(plain(frame), "\n")
+				if ls[0] != "╭"+strings.Repeat("─", w-2)+"╮" || ls[h-1] != "╰"+strings.Repeat("─", w-2)+"╯" {
+					t.Errorf("%dx%d: unexpected border top=%q bottom=%q", w, h, ls[0], ls[h-1])
+				}
+			}
+		}
+	}
+}

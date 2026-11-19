@@ -27,7 +27,7 @@ var allTabs = []string{"overview", "members", "mail", "graph", "epics"}
 func TestPaintNoHoles(t *testing.T) {
 	dw, dh := refSize(t, layer.Drawer)
 	bw, bh := refSize(t, layer.Board)
-	sizes := [][2]int{{dw, dh}, {bw, bh}, {0, 0}, {0, 5}, {5, 0}, {1, 1}, {3, 2}, {8, 3}, {20, 6}, {33, 9}, {48, 14}, {200, 50}, {300, 70}}
+	sizes := [][2]int{{dw, dh}, {bw, bh}, {0, 0}, {0, 5}, {5, 0}, {1, 1}, {1, 5}, {5, 1}, {2, 2}, {2, 5}, {3, 2}, {8, 3}, {20, 6}, {33, 9}, {48, 14}, {200, 50}, {300, 70}}
 	modes := map[string][]string{
 		"plain":   nil,
 		"moved":   {"j", "j", "G"},
@@ -83,7 +83,12 @@ func TestViewMapping(t *testing.T) {
 			t.Fatalf("bare session:\n%s", plain(f))
 		}
 		if !contains(f, "rex-amq-ui") || contains(f, "crew:") {
-			t.Fatalf("header: %q", lines(f)[0])
+			t.Fatalf("header: %q", lines(f)[1])
+		}
+		ls := lines(f)
+		if !strings.HasPrefix(ls[0], "╭") || !strings.HasSuffix(ls[0], "╮") ||
+			!strings.HasPrefix(ls[h-1], "╰") || !strings.HasSuffix(ls[h-1], "╯") {
+			t.Fatalf("missing rounded border: top=%q bottom=%q", ls[0], ls[h-1])
 		}
 	})
 	t.Run("alerts: bounced kept, removed dead letter gone, waiting first", func(t *testing.T) {
@@ -99,8 +104,8 @@ func TestViewMapping(t *testing.T) {
 			t.Error("the dead letter removed at seq 6 is still shown")
 		}
 		ls := lines(f)
-		if !strings.Contains(ls[3], "is waiting on you") {
-			t.Errorf("first alert %q: waiting on the human goes first", ls[3])
+		if !strings.Contains(ls[4], "is waiting on you") {
+			t.Errorf("first alert %q: waiting on the human goes first", ls[4])
 		}
 		// Alerts sit above the narrator's prose.
 		ia, in := slices.IndexFunc(ls, func(s string) bool { return strings.Contains(s, "SYSTEM ALERTS") }), slices.IndexFunc(ls, func(s string) bool { return strings.Contains(s, "from narrator") })
@@ -208,8 +213,8 @@ func TestViewMapping(t *testing.T) {
 	t.Run("epics: first and default in a personal session", func(t *testing.T) {
 		m := build(t, "edited-personal-cockpit", w, h, Deps{}, Options{})
 		ls := lines(m.Frame())
-		if !strings.HasPrefix(strings.TrimSpace(ls[1]), "Epics 2") || m.tab != TabEpics {
-			t.Fatalf("tab bar %q, tab %v", ls[1], m.tab)
+		if !strings.HasPrefix(strings.TrimSpace(strings.Trim(ls[2], "│")), "Epics 2") || m.tab != TabEpics {
+			t.Fatalf("tab bar %q, tab %v", ls[2], m.tab)
 		}
 		f := m.Frame()
 		for _, s := range []string{"auth-refresh", "/Users/human/projects/auth", "opened", "hand-back", "!2", "billing", "creating", "no narrator yet"} {
@@ -234,8 +239,8 @@ func TestViewMapping(t *testing.T) {
 	t.Run("status line follows the stream", func(t *testing.T) {
 		m := build(t, "recorded-bare", w, h, Deps{}, Options{})
 		m = step(t, m, adapter.StatusUpdate{Status: adapter.Reconnecting, Err: errors.New("adapter: exit status 1")})
-		if !strings.Contains(lines(m.Frame())[0], "◌ Reconnecting") {
-			t.Fatalf("%q", lines(m.Frame())[0])
+		if !strings.Contains(lines(m.Frame())[1], "◌ Reconnecting") {
+			t.Fatalf("%q", lines(m.Frame())[1])
 		}
 		fresh := New(Deps{Clock: fixtures["recorded-bare"]}, Options{})
 		fresh = step(t, fresh, tea.WindowSizeMsg{Width: w, Height: h})
@@ -246,32 +251,32 @@ func TestViewMapping(t *testing.T) {
 		refused := New(Deps{Clock: fixtures["recorded-bare"]}, Options{})
 		refused = step(t, refused, tea.WindowSizeMsg{Width: w, Height: h})
 		refused = step(t, refused, adapter.StatusUpdate{Status: adapter.Refused, Err: &adapter.EnvelopeError{Code: "guard_denied", Message: "this command is the human's"}})
-		if f := refused.Frame(); !strings.Contains(lines(f)[0], "✕ Refused") || !contains(f, "guard_denied: this command is the human's") || contains(f, "retrying in") {
+		if f := refused.Frame(); !strings.Contains(lines(f)[1], "✕ Refused") || !contains(f, "guard_denied: this command is the human's") || contains(f, "retrying in") {
 			t.Fatalf("\n%s", plain(f))
 		}
 	})
 	t.Run("graph region and replay bar", func(t *testing.T) {
 		m := build(t, "edited-crew-attention", w, h, Deps{}, Options{Tab: "graph"})
 		r := m.GraphRegion()
-		if r != (Rect{X: 0, Y: 3, W: w, H: h - 6}) {
+		if r != (Rect{X: 1, Y: 4, W: w - 2, H: h - 8}) {
 			t.Fatalf("region %+v", r)
 		}
 		ls := lines(m.Frame())
 		for y := r.Y; y < r.Y+r.H; y++ {
-			if strings.TrimSpace(ls[y]) != "" {
-				t.Fatalf("region row %d not blank: %q", y, ls[y])
+			if ls[y] != "│"+strings.Repeat(" ", w-2)+"│" {
+				t.Fatalf("region row %d not framed blank: %q", y, ls[y])
 			}
 		}
-		if !strings.Contains(ls[2], "3 / 3 messages · 4m00s") || !strings.Contains(ls[r.Y+r.H], "drained") {
-			t.Fatalf("bar %q legend %q", ls[2], ls[r.Y+r.H])
+		if !strings.Contains(ls[3], "3 / 3 messages · 4m00s") || !strings.Contains(ls[r.Y+r.H], "drained") {
+			t.Fatalf("bar %q legend %q", ls[3], ls[r.Y+r.H])
 		}
 		m = press(t, m, "[")
-		if !strings.Contains(lines(m.Frame())[2], "2 / 3") || !contains(m.Frame(), "question about scope") {
+		if !strings.Contains(lines(m.Frame())[3], "2 / 3") || !contains(m.Frame(), "question about scope") {
 			t.Fatalf("replay step back:\n%s", plain(m.Frame()))
 		}
 		m = press(t, m, "h")
-		if !strings.Contains(lines(m.Frame())[2], "/ 2 messages") {
-			t.Fatalf("hide retired: %q", lines(m.Frame())[2])
+		if !strings.Contains(lines(m.Frame())[3], "/ 2 messages") {
+			t.Fatalf("hide retired: %q", lines(m.Frame())[3])
 		}
 		m = press(t, m, "L")
 		if m.graphAt != "" {
@@ -307,7 +312,7 @@ func TestKeys(t *testing.T) {
 		rec := &recorder{}
 		m := build(t, "edited-crew-attention", w, h, Deps{Layer: rec}, Options{Tab: "members"})
 		m = press(t, m, "z")
-		if m.size != layer.Board || !strings.Contains(lines(m.Frame())[0], "Board") {
+		if m.size != layer.Board || !strings.Contains(lines(m.Frame())[1], "Board") {
 			t.Fatalf("size %v", m.size)
 		}
 		m = press(t, m, "z", "2", "enter")
@@ -350,7 +355,7 @@ func TestKeys(t *testing.T) {
 		if !reflect.DeepEqual(rec.got(), []string{"switch session:t"}) || m.Paused() {
 			t.Fatalf("calls %v paused %v", rec.got(), m.Paused())
 		}
-		if foot := lines(m.Frame())[h-1]; !strings.Contains(foot, "Remote Control") {
+		if foot := lines(m.Frame())[h-2]; !strings.Contains(foot, "Remote Control") {
 			t.Fatalf("footer %q", foot)
 		}
 	})
@@ -431,8 +436,8 @@ func TestKeys(t *testing.T) {
 		down := &recorder{fail: map[string]error{"resize": fmt.Errorf("%w: dial unix /x.sock: connect: no such file", layer.ErrDisconnected)}}
 		m = build(t, "edited-crew-attention", w, h, Deps{Layer: down}, Options{})
 		m = step(t, m, layer.State{})
-		if !strings.Contains(lines(m.Frame())[0], "◌ Rex") {
-			t.Fatalf("header %q: a panel that lost Rex should say so", lines(m.Frame())[0])
+		if !strings.Contains(lines(m.Frame())[1], "◌ Rex") {
+			t.Fatalf("header %q: a panel that lost Rex should say so", lines(m.Frame())[1])
 		}
 		m = press(t, m, "z")
 		if !contains(m.Frame(), "not connected to Rex: dial unix /x.sock") {

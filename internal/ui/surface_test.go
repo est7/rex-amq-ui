@@ -65,13 +65,13 @@ func calls(s *rexctltest.Server, from int) []string {
 // the refused session switch, and opening twice.
 func TestSurface(t *testing.T) {
 	ctx := context.Background()
-	t.Run("bounds: drawer 35% and board 88% of a 200x50 window", func(t *testing.T) {
+	t.Run("bounds: drawer 42% and board 88% of a 200x50 window", func(t *testing.T) {
 		for _, c := range []struct {
 			size       layer.Size
 			cols, rows int
 			bounds     rexctl.Bounds
 		}{
-			{layer.Drawer, 70, 48, rexctl.Bounds{0.64, 0.02, 0.35, 0.96}},
+			{layer.Drawer, 84, 48, rexctl.Bounds{0.57, 0.02, 0.42, 0.96}},
 			{layer.Board, 176, 44, rexctl.Bounds{0.06, 0.06, 0.88, 0.88}},
 		} {
 			s := rexctltest.NewServer(t)
@@ -200,7 +200,7 @@ func TestSurface(t *testing.T) {
 			} `json:"args"`
 		}
 		r.Decode(&perf)
-		foot := lines(m.Frame())[h-1]
+		foot := lines(m.Frame())[h-2]
 		if perf.Action != "session.select" || perf.Args.SessionID != "session:s" || m.Paused() ||
 			!strings.Contains(foot, "enable Rex Settings > Rex Server > Remote Control") {
 			t.Fatalf("perform %+v paused %v footer %q", perf, m.Paused(), foot)

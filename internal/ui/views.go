@@ -111,7 +111,7 @@ func (m Model) overviewEntries() []entry {
 	v := m.view()
 	if v != nil && !v.NoView() && v.Narrative != nil && v.Narrative.Text != "" {
 		add(row, p.Bg, []Span{{Text: " from narrator (" + v.Narrator + ") · " + ago(now, v.Narrative.At) + " ago", Fg: p.Muted, Italic: true}})
-		lines := wrap(v.Narrative.Text, m.w-2)
+		lines := wrap(v.Narrative.Text, m.innerW()-2)
 		for _, l := range lines[:min(len(lines), 6)] {
 			add(row, p.Bg, []Span{{Text: " " + l, Fg: p.Fg}})
 		}
@@ -271,7 +271,7 @@ func (m Model) memberEntry(a adapter.Agent, i int) entry {
 	if retired {
 		nameFg = p.Faint
 	}
-	wide := m.w >= 100
+	wide := m.innerW() >= 100
 	nameW := 26
 	if !wide {
 		nameW = 24
@@ -373,7 +373,7 @@ func (m Model) mailView(c *canvas) {
 			m.mailCapsule(msg), {Text: " " + msg.Subject, Fg: p.Fg, Bold: i == m.sel[TabMail]}}
 		es = append(es, entry{left: left, bg: bg, row: i})
 		if open {
-			body := wrap(ex.Body, m.w-8)
+			body := wrap(ex.Body, m.innerW()-8)
 			for _, l := range body[:min(len(body), 6)] {
 				es = append(es, entry{left: []Span{{Text: "       " + l, Fg: p.Muted}}, bg: p.Surface, row: i})
 			}
@@ -402,9 +402,12 @@ func (m Model) mailCapsule(msg adapter.Message) Span {
 
 // GraphRegion is the rectangle of the frame the Graph tab leaves to the
 // graph renderer, painted with the background until it draws there: the
-// rows between the replay bar and the legend.
+// rows between the replay bar and the legend, inside the panel border.
 func (m Model) GraphRegion() Rect {
-	return Rect{X: 0, Y: headerLines + 1, W: max(m.w, 0), H: max(m.contentHeight()-3, 0)}
+	if !m.framed() {
+		return Rect{}
+	}
+	return Rect{X: borderWidth, Y: borderWidth + headerLines + 1, W: m.innerW(), H: max(m.contentHeight()-3, 0)}
 }
 
 func (m Model) graphView(c *canvas) {

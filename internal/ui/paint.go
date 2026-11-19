@@ -165,13 +165,39 @@ func (c *canvas) addLR(bg color.Color, left, right []Span) {
 // blank appends an empty line.
 func (c *canvas) blank() { c.add() }
 
+// rows pads c to h lines and returns them (each width w, or "" when w == 0).
+func (c *canvas) rows() []string {
+	for !c.full() {
+		c.blank()
+	}
+	return c.lines
+}
+
 // String is the frame: h lines of w cells.
 func (c *canvas) String() string {
 	if c.w == 0 || c.h == 0 {
 		return ""
 	}
-	for !c.full() {
-		c.blank()
+	return strings.Join(c.rows(), "\n")
+}
+
+// frameCanvas wraps inner (sized w-2 x h-2) in a 1-cell opaque rounded border
+// when w >= 2 && h >= 2. Tiny dimensions fall back to a solid bg canvas so
+// every cell still carries an explicit background.
+func frameCanvas(w, h int, bg, borderFg color.Color, inner *canvas) string {
+	if w <= 0 || h <= 0 {
+		return ""
 	}
-	return strings.Join(c.lines, "\n")
+	if w < 2 || h < 2 {
+		return newCanvas(w, h, bg).String()
+	}
+	lines := make([]string, 0, h)
+	fill := strings.Repeat("─", w-2)
+	lines = append(lines, line(w, bg, Span{Text: "╭" + fill + "╮", Fg: borderFg}))
+	edge := render(Span{Text: "│", Fg: borderFg}, bg)
+	for _, r := range inner.rows() {
+		lines = append(lines, edge+r+edge)
+	}
+	lines = append(lines, line(w, bg, Span{Text: "╰" + fill + "╯", Fg: borderFg}))
+	return strings.Join(lines, "\n")
 }
