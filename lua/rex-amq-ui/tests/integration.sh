@@ -93,6 +93,7 @@ act amqui_toggle
 panel=$(panel_block)
 [ -n "$panel" ] || fail "no rex-amq-ui layer"
 wait_screen "$panel" "SYSTEM ALERTS" || fail "panel did not draw its Overview"
+wait_screen "$panel" "╭" || fail "panel did not draw its rounded border"
 [ "$(focused)" = "$panel" ] || fail "new panel is not focused"
 summary
 
@@ -106,6 +107,17 @@ step "toggle on the minimized panel: restores it with focus"
 act amqui_toggle
 [ "$(panel_state)" = normal ] || fail "panel not normal"
 [ "$(focused)" = "$panel" ] || fail "restored panel is not focused"
+
+step "toggle on a visible panel when a tiled pane has focus: minimizes in one press"
+printf '{"block_id":"%s"}' "$block" >"$tmp/focus.json"
+rex api call -s "$session" session.focus_block "@$tmp/focus.json" >/dev/null
+[ "$(focused)" = "$block" ] || fail "could not focus tiled pane"
+[ "$(panel_state)" = normal ] || fail "panel did not stay up when tiled pane took focus"
+act amqui_toggle
+[ "$(panel_state)" = minimized ] || fail "single-press toggle did not minimize unfocused visible panel"
+[ "$(focused)" = "$block" ] || fail "focus did not stay on the tiled pane"
+act amqui_toggle >/dev/null
+[ "$(panel_state)" = normal ] || fail "panel not restored after unfocused hide"
 
 step "APC written through block.method switches the panel's tab"
 printf '{"block_id":"%s","method":"write","args":{"data":"\\u001b_amqui;tab:mail\\u001b\\\\"}}' "$panel" >"$tmp/write.json"
