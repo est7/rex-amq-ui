@@ -197,6 +197,86 @@ func TestPanelLeavesInOrder(t *testing.T) {
 	}
 }
 
+func TestJumpToSession(t *testing.T) {
+	t.Run("same session falls back to Jump", func(t *testing.T) {
+		s := rexctltest.NewServer(t)
+		s.SetView(view(5, panel, true, "", "client:app", Drawer.Bounds()))
+		p, err := Connect(context.Background(), s.URL, sess, panel, paneB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := len(s.Requests())
+		if err := p.JumpToSession(context.Background(), sess, paneA); err != nil {
+			t.Fatal(err)
+		}
+		if got := methods(s)[before:]; !reflect.DeepEqual(got, []string{"session.set_layer_state", "session.focus_block"}) {
+			t.Fatalf("same-session calls %v", got)
+		}
+	})
+
+	t.Run("cross session switches, focuses block on target session, then minimizes", func(t *testing.T) {
+		const otherSess = "session:01a1e4ff-0000-7000-8000-0000000000s2"
+		const otherPane = "block:01a1e4ff-0000-7000-8000-0000000000ee"
+		s := rexctltest.NewServer(t)
+		s.SetView(view(5, panel, true, "", "client:app", Drawer.Bounds()))
+		p, err := Connect(context.Background(), s.URL, sess, panel, paneB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := len(s.Requests())
+		if err := p.JumpToSession(context.Background(), otherSess, otherPane); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"client.list", "client.perform", "session.attach", "session.focus_block", "session.set_layer_state"}
+		if got := methods(s)[before:]; !reflect.DeepEqual(got, want) {
+			t.Fatalf("cross-session calls %v, want %v", got, want)
+		}
+		r, _ := s.Last("session.focus_block")
+		var fb struct {
+			SessionID string `json:"session_id"`
+			BlockID   string `json:"block_id"`
+		}
+		if err := r.Decode(&fb); err != nil || fb.SessionID != otherSess || fb.BlockID != otherPane {
+			t.Fatalf("focus_block %+v (%v)", fb, err)
+		}
+		rm, _ := s.Last("session.set_layer_state")
+		var ms struct {
+			SessionID string `json:"session_id"`
+			State     string `json:"state"`
+		}
+		if err := rm.Decode(&ms); err != nil || ms.SessionID != sess || ms.State != "minimized" {
+			t.Fatalf("set_layer_state %+v (%v)", ms, err)
+		}
+	})
+
+	t.Run("refused remote control leaves panel up and does not focus target", func(t *testing.T) {
+		const otherSess = "session:01a1e4ff-0000-7000-8000-0000000000s2"
+		s := rexctltest.NewServer(t)
+		s.SetView(view(5, panel, true, "", "client:app", Drawer.Bounds()))
+		s.Handle("client.perform", func(rexctltest.Request) (any, *rexctltest.Error) {
+			return nil, &rexctltest.Error{Code: "refused", Message: "remote control is off", Status: 403}
+		})
+		p, err := Connect(context.Background(), s.URL, sess, panel, paneB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := len(s.Requests())
+		if err := p.JumpToSession(context.Background(), otherSess, paneA); !errors.Is(err, ErrRemoteControlOff) {
+			t.Fatalf("err %v, want ErrRemoteControlOff", err)
+		}
+		if got := methods(s)[before:]; !reflect.DeepEqual(got, []string{"client.list", "client.perform"}) {
+			t.Fatalf("refused calls %v, want only client.list and client.perform", got)
+		}
+	})
+
+	t.Run("disconnected fails fast", func(t *testing.T) {
+		p := New("unix:///nonexistent/rex.sock", sess, panel, paneA)
+		if err := p.JumpToSession(context.Background(), "session:other", paneB); !errors.Is(err, ErrDisconnected) {
+			t.Fatalf("err %v, want ErrDisconnected", err)
+		}
+	})
+}
+
 func TestWatchFollowsFocusOwnerAndState(t *testing.T) {
 	s := rexctltest.NewServer(t)
 	s.SetView(view(5, panel, true, "", "", Drawer.Bounds()))

@@ -128,6 +128,20 @@ func newGraphTab(g Graphics, clock Clock) *graphTab {
 	return &graphTab{out: &screen{w: g.Out}, g: graph.New(clock.Now), tr: kitty.NewTransport(g.Dir, g.PID), sched: kitty.NewScheduler(30)}
 }
 
+// reset replaces the graph model for a newly subscribed session so nodes,
+// pulses, and selection from the previous session cannot bleed over.
+func (gt *graphTab) reset(clock Clock, st adapter.State) {
+	gt.g = graph.New(clock.Now)
+	if st.Ready() {
+		gt.g.Update(st)
+	}
+	gt.at = ""
+	gt.hide = false
+	gt.selected = ""
+	gt.scene = graph.Scene{}
+	gt.dirty = true
+}
+
 // NeedsAnimation makes graphTab the scheduler's Animator: a frame is due
 // when the picture changed or moves on its own.
 func (gt *graphTab) NeedsAnimation() bool { return gt.dirty || gt.g.NeedsAnimation() }

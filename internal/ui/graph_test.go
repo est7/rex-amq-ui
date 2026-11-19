@@ -721,3 +721,52 @@ func TestGraphTabPartialWriteStillTornDown(t *testing.T) {
 		}
 	})
 }
+
+func TestGraphTabDrillDownResetsModelAndTearsDownOnPop(t *testing.T) {
+	ctl := &cellRecorder{w: cw, h: ch}
+	r := panelOn(t, "edited-personal-cockpit", ctl, newTerm())
+	// Show Hub's Graph tab first so Hub nodes (pi-05) are loaded into gfx.
+	r.send(mustTab("graph"), 8)
+	if !r.term.showing() {
+		t.Fatalf("hub graph did not draw: %s", r.term)
+	}
+	r.send(mustTab("epics"), 4)
+	if !r.term.blank() {
+		t.Fatalf("leaving hub graph did not clear: %s", r.term)
+	}
+	// Drill into auth-refresh and feed the Epic stream.
+	r.send(key("enter"), 4)
+	for _, f := range frames(t, "edited-crew-attention") {
+		r.send(StreamUpdate{Gen: 1, Update: adapter.FrameUpdate{Frame: f}}, 2)
+	}
+	r.send(mustTab("graph"), 8)
+	if !r.term.showing() {
+		t.Fatalf("epic graph did not draw: %s", r.term)
+	}
+	for _, n := range r.m.gfx.scene.Nodes {
+		if n.ID == "pi-05" {
+			t.Fatalf("hub node pi-05 bled into drilled-down epic graph: %+v", r.m.gfx.scene.Nodes)
+		}
+	}
+	// Pop back directly from Epic's Graph tab: Kitty image & pixel mouse must clear.
+	if out := r.send(key("esc"), 6); out != clearOff || !r.term.blank() || r.m.DrilledDown() || r.m.tab != TabEpics {
+		t.Fatalf("esc from epic graph: out=%q term=%s drilled=%v tab=%v", out, r.term, r.m.DrilledDown(), r.m.tab)
+	}
+	// Returning to Hub Graph shows Hub node pi-05 and no Epic nodes.
+	r.send(mustTab("graph"), 8)
+	if !r.term.showing() {
+		t.Fatalf("hub graph after pop did not draw: %s", r.term)
+	}
+	sawHub := false
+	for _, n := range r.m.gfx.scene.Nodes {
+		if n.ID == "pi-05" {
+			sawHub = true
+		}
+		if n.ID == "claude-01" || n.ID == "claude-02" {
+			t.Fatalf("epic node %s bled back into hub graph", n.ID)
+		}
+	}
+	if !sawHub {
+		t.Fatalf("hub node pi-05 missing after pop-back: %+v", r.m.gfx.scene.Nodes)
+	}
+}

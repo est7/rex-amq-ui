@@ -11,6 +11,7 @@
 package ui
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"image/color"
@@ -31,6 +32,9 @@ type Controller interface {
 	Minimize(ctx context.Context) error
 	// Jump minimizes the layer, then focuses block.
 	Jump(ctx context.Context, block string) error
+	// JumpToSession switches the Rex app to session, focuses block inside
+	// that session, and minimizes the panel in its own session.
+	JumpToSession(ctx context.Context, session, block string) error
 	// SwitchTo shows another session, then minimizes the layer; it fails
 	// with layer.ErrRemoteControlOff when the Rex app refuses.
 	SwitchTo(ctx context.Context, session string) error
@@ -48,11 +52,23 @@ type SystemClock struct{}
 
 func (SystemClock) Now() time.Time { return time.Now() }
 
+// StreamUpdate is an adapter.Update tagged with the subscription generation
+// it belongs to. Update drops any StreamUpdate whose Gen does not match the
+// model's active subscription so late frames or statuses from a cancelled
+// stream cannot corrupt a newly selected session.
+type StreamUpdate struct {
+	Gen    uint64
+	Update adapter.Update
+}
+
 // Deps are the model's ways out. Zero fields disable what they serve, with
 // a hint in the footer when the human asks for it.
 type Deps struct {
 	Layer Controller
 	Clock Clock
+	// Subscribe switches the live adapter stream to session and tags its
+	// delivered updates with gen (StreamUpdate).
+	Subscribe func(session string, gen uint64)
 	// Exec runs a program to completion with env added to this process's
 	// environment (md-viewer).
 	Exec func(ctx context.Context, env []string, name string, args ...string) error
@@ -69,6 +85,8 @@ type Deps struct {
 
 // Options are the panel's starting state.
 type Options struct {
+	// Session is the root Rex session the panel was started for.
+	Session string
 	// Tab is the tab to show first (an apc.Tabs name); "" is Epics in a
 	// personal session and Overview elsewhere.
 	Tab  string
@@ -102,6 +120,10 @@ func tabNamed(name string) (Tab, bool) {
 // Model is the panel. It is a value: Update returns the next one.
 type Model struct {
 	deps Deps
+
+	session   string
+	streamGen uint64
+	drill     *drillState
 
 	st     adapter.State
 	status adapter.StatusUpdate
@@ -146,6 +168,17 @@ type Model struct {
 	gfx *graphTab
 }
 
+// drillState holds the Hub session we drilled down from and the Epic being
+// viewed in-place. Nil at the root level.
+type drillState struct {
+	hubSession string
+	hubLabel   string
+	hubSt      adapter.State
+	hubStatus  adapter.StatusUpdate
+	hubSel     int
+	epic       adapter.Epic
+}
+
 type mailState struct {
 	typing   bool
 	query    string
@@ -159,7 +192,7 @@ func New(d Deps, o Options) Model {
 	if d.Clock == nil {
 		d.Clock = SystemClock{}
 	}
-	m := Model{deps: d, pal: theme.Default(), size: o.Size, sel: map[Tab]int{},
+	m := Model{deps: d, session: o.Session, pal: theme.Default(), size: o.Size, sel: map[Tab]int{},
 		mail: mailState{follow: true, expanded: map[string]bool{}}}
 	m.lay.Focused = o.Focused
 	m.lay.Size = o.Size
@@ -171,6 +204,17 @@ func New(d Deps, o Options) Model {
 		m.tab, m.tabSet = t, true
 	}
 	return m
+}
+
+// DrilledDown reports whether the panel is currently viewing a linked Epic
+// in-place from a Hub session.
+func (m Model) DrilledDown() bool { return m.drill != nil }
+
+func (m Model) currentSession() string {
+	if m.drill != nil {
+		return cmp.Or(m.st.Scope.SessionID, m.drill.epic.SessionID)
+	}
+	return cmp.Or(m.st.Scope.SessionID, m.session)
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -206,6 +250,12 @@ func Filter(model tea.Model, msg tea.Msg) tea.Msg {
 
 // Update folds msg into the model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if su, ok := msg.(StreamUpdate); ok {
+		if su.Gen != m.streamGen {
+			return m, nil
+		}
+		msg = su.Update
+	}
 	next, cmd := m.update(msg)
 	n := next.(Model)
 	if n.sizeHeld && !n.paused {
@@ -260,7 +310,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) settle() {
 	m.trackOwed()
 	tabs := m.tabs()
-	if !m.tabSet && m.st.Ready() && m.personal() {
+	if !m.tabSet && m.st.Ready() && !m.DrilledDown() && m.personal() {
 		m.tab, m.tabSet = TabEpics, true
 	}
 	if !containsTab(tabs, m.tab) {
@@ -281,13 +331,95 @@ func clampSel(i, n int) int { return max(0, min(i, n-1)) }
 
 func (m Model) personal() bool { return m.st.Panel != nil && m.st.Panel.Personal() }
 
-// tabs are the tabs shown, in order: Epics first in a personal session.
+// tabs are the tabs shown, in order: Epics first in a personal session,
+// omitted while drilled down into a linked Epic.
 func (m Model) tabs() []Tab {
 	t := []Tab{TabOverview, TabMembers, TabMail, TabGraph}
-	if m.personal() {
+	if !m.DrilledDown() && m.personal() {
 		t = append([]Tab{TabEpics}, t...)
 	}
 	return t
+}
+
+// drillDown enters the selected Epic in-place: saves the Hub session state,
+// resets Epic-local UI and Graph state, and switches the live stream to the
+// Epic's session.
+func (m Model) drillDown() (Model, tea.Cmd) {
+	e, ok := m.selectedEpic()
+	if !ok {
+		return m, nil
+	}
+	if e.SessionID == "" {
+		m.hint, m.hintBad = "epic has no session", true
+		return m, nil
+	}
+	hubLabel := ""
+	if m.st.Panel != nil {
+		hubLabel = m.st.Panel.SessionLabel
+	}
+	if hubLabel == "" {
+		hubLabel = "hub"
+	}
+	m.drill = &drillState{
+		hubSession: cmp.Or(m.st.Scope.SessionID, m.session),
+		hubLabel:   hubLabel,
+		hubSt:      m.st,
+		hubStatus:  m.status,
+		hubSel:     m.sel[TabEpics],
+		epic:       e,
+	}
+	m.st = adapter.State{}
+	m.status = adapter.StatusUpdate{Status: adapter.Connecting}
+	m.tab, m.tabSet = TabOverview, true
+	m.hint, m.hintBad = "", false
+	m.sel = map[Tab]int{}
+	m.retired = false
+	m.owed = nil
+	m.mail = mailState{follow: true, expanded: map[string]bool{}}
+	m.graphAt = ""
+	m.hideRetired = false
+	if m.gfx != nil {
+		m.gfx.reset(m.deps.Clock, m.st)
+	}
+	m.streamGen++
+	return m, m.subscribe(e.SessionID, m.streamGen)
+}
+
+// popBack leaves a drilled-down Epic and restores the saved Hub Epics view
+// while resubscribing the live stream to the Hub session.
+func (m Model) popBack() (Model, tea.Cmd) {
+	if m.drill == nil {
+		return m, nil
+	}
+	d := m.drill
+	m.drill = nil
+	m.st = d.hubSt
+	m.status = d.hubStatus
+	m.tab, m.tabSet = TabEpics, true
+	m.hint, m.hintBad = "", false
+	m.sel = map[Tab]int{TabEpics: d.hubSel}
+	m.retired = false
+	m.owed = nil
+	m.mail = mailState{follow: true, expanded: map[string]bool{}}
+	m.graphAt = ""
+	m.hideRetired = false
+	m.settle()
+	if m.gfx != nil {
+		m.gfx.reset(m.deps.Clock, m.st)
+	}
+	m.streamGen++
+	return m, m.subscribe(d.hubSession, m.streamGen)
+}
+
+func (m Model) subscribe(session string, gen uint64) tea.Cmd {
+	sub := m.deps.Subscribe
+	if sub == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		sub(session, gen)
+		return nil
+	}
 }
 
 func containsTab(ts []Tab, t Tab) bool {

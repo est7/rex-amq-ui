@@ -145,6 +145,394 @@ func TestPanelProgram(t *testing.T) {
 	t.Logf("line erases the renderer used, all under a set background: %v", seen)
 }
 
+// viewObserver records the latest ANSI-stripped frame rendered by tea.Model so
+// integration tests assert against the actual current screen rather than raw
+// incremental terminal diff bytes.
+type viewObserver struct {
+	mu    sync.Mutex
+	frame string
+}
+
+func (o *viewObserver) record(v tea.View) {
+	o.mu.Lock()
+	o.frame = ansi.Strip(v.Content)
+	o.mu.Unlock()
+}
+
+func (o *viewObserver) current() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.frame
+}
+
+type observedModel struct {
+	tea.Model
+	obs *viewObserver
+}
+
+func (m observedModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.Model.Update(msg)
+	return observedModel{Model: next, obs: m.obs}, cmd
+}
+
+func (m observedModel) View() tea.View {
+	v := m.Model.View()
+	m.obs.record(v)
+	return v
+}
+
+// TestPanelProgramDrillDownStreamSwitch verifies live Hub -> Epic drill-down
+// stream switching (--session <epic>) and Esc / Backspace return (--session
+// <hub>) end to end through runPanel, apc.Reader, ui.Model, and streamManager.
+func TestPanelProgramDrillDownStreamSwitch(t *testing.T) {
+	dir := t.TempDir()
+	hubFixture, err := filepath.Abs(filepath.Join("..", "..", "testdata", "panel", "edited-personal-cockpit.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	epicFixture, err := filepath.Abs(filepath.Join("..", "..", "testdata", "panel", "edited-crew-attention.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callsFile := filepath.Join(dir, "calls.log")
+	script := filepath.Join(dir, "rex-amq-adapter")
+	body := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> '%s'
+sess=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session" ]; then sess="$a"; fi
+  prev="$a"
+done
+case "$sess" in
+  session:p) cat '%s' ;;
+  session:s) cat '%s' ;;
+  *) exit 1 ;;
+esac
+exec sleep 60
+`, callsFile, hubFixture, epicFixture)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inW.Close()
+	out := &syncBuffer{}
+	obs := &viewObserver{}
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runPanel(context.Background(), panelConfig{
+			Session:    "session:p",
+			AdapterBin: script,
+			CacheDir:   filepath.Join(dir, "cache"),
+			In:         inR,
+			Out:        out,
+			Width:      90,
+			Height:     48,
+			Options:    ui.Options{},
+			wrap:       func(m tea.Model) tea.Model { return observedModel{Model: m, obs: obs} },
+		})
+	}()
+
+	readCalls := func() []string {
+		b, err := os.ReadFile(callsFile)
+		if err != nil {
+			return nil
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return nil
+		}
+		return strings.Split(s, "\n")
+	}
+	frameHas := func(want ...string) func() bool {
+		return func() bool {
+			f := obs.current()
+			for _, s := range want {
+				if !strings.Contains(f, s) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+
+	// 1. Initial Hub stream starts on --session session:p and shows Epics.
+	waitFor(t, "initial Hub Epics view", frameHas("Epics 2"))
+	waitFor(t, "initial Hub stream call", func() bool { return len(readCalls()) >= 1 })
+
+	// 2. Enter drills down in-place into auth-refresh (session:s).
+	inW.WriteString("\r")
+	waitFor(t, "Epic stream subscription", func() bool { return len(readCalls()) >= 2 })
+	waitFor(t, "drilled breadcrumb and Epic Overview alerts", frameHas("← me › auth-refresh", "SYSTEM ALERTS  5"))
+
+	// 3. Tab into Epic Members tab verifies live Epic data.
+	inW.WriteString("\t")
+	waitFor(t, "drilled Epic Members tab", frameHas("Retired 1", "implementer(claude-02)"))
+
+	// 4. Esc returns cleanly to Hub Epics and resubscribes --session session:p.
+	inW.WriteString("\x1b")
+	waitFor(t, "Hub stream resubscription after Esc", func() bool { return len(readCalls()) >= 3 })
+	waitFor(t, "Hub Epics restored after Esc", func() bool {
+		f := obs.current()
+		return strings.Contains(f, "Epics 2") && !strings.Contains(f, "← me › auth-refresh")
+	})
+
+	// 5. Drill in again and verify Backspace also returns to Hub Epics.
+	inW.WriteString("\r")
+	waitFor(t, "second Epic stream subscription", func() bool { return len(readCalls()) >= 4 })
+	waitFor(t, "second drilled breadcrumb", frameHas("← me › auth-refresh"))
+
+	inW.WriteString("\x7f")
+	waitFor(t, "Hub stream resubscription after Backspace", func() bool { return len(readCalls()) >= 5 })
+	waitFor(t, "Hub Epics restored after Backspace", func() bool {
+		f := obs.current()
+		return strings.Contains(f, "Epics 2") && !strings.Contains(f, "← me › auth-refresh")
+	})
+
+	// 6. Quit cleanly.
+	inW.WriteString("Q")
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("panel ended with %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Q did not quit the panel")
+	}
+
+	got := readCalls()
+	want := []string{
+		"stream panel --session session:p",
+		"stream panel --session session:s",
+		"stream panel --session session:p",
+		"stream panel --session session:s",
+		"stream panel --session session:p",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("adapter stream calls:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestStreamManagerRejectsStaleGeneration(t *testing.T) {
+	m := newStreamManager("/bin/false", "session:p")
+
+	// Before run() dequeues initial gen=0: out-of-order Switch(hub, 2) then Switch(epic, 1).
+	m.Switch("session:p", 2)
+	m.Switch("session:s", 1)
+	m.Switch("session:s", 0)
+	m.Switch("session:s", 2)
+
+	m.mu.Lock()
+	gotQueued := m.next
+	m.mu.Unlock()
+	if gotQueued == nil || gotQueued.session != "session:p" || gotQueued.gen != 2 {
+		t.Fatalf("queued request = %+v, want {session:session:p gen:2}", gotQueued)
+	}
+
+	// After run() dequeues gen=2 and starts its child stream: delayed Switch(epic, 1)
+	// must neither overwrite m.next nor cancel the running gen=2 child.
+	cancelled := false
+	m.mu.Lock()
+	m.next = nil
+	m.cancel = func() { cancelled = true }
+	m.mu.Unlock()
+
+	m.Switch("session:s", 1)
+	m.Switch("session:s", 2)
+
+	m.mu.Lock()
+	afterStale := m.next
+	m.mu.Unlock()
+	if cancelled {
+		t.Fatal("stale Switch cancelled the active higher-generation stream")
+	}
+	if afterStale != nil {
+		t.Fatalf("stale Switch queued %+v, want nil", afterStale)
+	}
+
+	// A strictly newer generation still cancels the active child and queues cleanly.
+	m.Switch("session:s", 3)
+	m.mu.Lock()
+	afterNew := m.next
+	m.mu.Unlock()
+	if !cancelled {
+		t.Fatal("newer Switch(gen=3) did not cancel the active gen=2 stream")
+	}
+	if afterNew == nil || afterNew.session != "session:s" || afterNew.gen != 3 {
+		t.Fatalf("newer queued request = %+v, want {session:session:s gen:3}", afterNew)
+	}
+}
+
+type reorderEnterEscModel struct {
+	observedModel
+	delayedEnter chan tea.Cmd
+}
+
+func (m reorderEnterEscModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.observedModel.Update(msg)
+	obs := next.(observedModel)
+	if kp, ok := msg.(tea.KeyPressMsg); ok && kp.Code == tea.KeyEnter && cmd != nil {
+		select {
+		case m.delayedEnter <- cmd:
+			cmd = nil
+		default:
+		}
+	}
+	return reorderEnterEscModel{observedModel: obs, delayedEnter: m.delayedEnter}, cmd
+}
+
+// TestPanelProgramOutOfOrderEnterEscKeepsHubLive drives real Enter (drillDown,
+// gen=1) and Esc (popBack, gen=2) tea.Cmds out of order — executing gen=2
+// before gen=1 — and verifies generation 2 stays active and delivers live Hub
+// updates rather than being replaced by stale generation 1.
+func TestPanelProgramOutOfOrderEnterEscKeepsHubLive(t *testing.T) {
+	dir := t.TempDir()
+	hubRaw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "panel", "edited-personal-cockpit.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubSnap1Line := strings.SplitN(string(hubRaw), "\n", 2)[0]
+	if !strings.Contains(hubSnap1Line, `"seq":1`) || !strings.Contains(hubSnap1Line, `"billing"`) {
+		t.Fatalf("unexpected Hub fixture snapshot line")
+	}
+	hubSnap2Line := strings.Replace(hubSnap1Line, `"seq":1`, `"seq":2`, 1)
+	hubSnap2Line = strings.Replace(hubSnap2Line, `"billing"`, `"live-hub-update"`, 2)
+
+	hubSnap1 := filepath.Join(dir, "hub1.ndjson")
+	hubSnap2 := filepath.Join(dir, "hub2.ndjson")
+	if err := os.WriteFile(hubSnap1, []byte(hubSnap1Line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hubSnap2, []byte(hubSnap2Line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	epicFixture, err := filepath.Abs(filepath.Join("..", "..", "testdata", "panel", "edited-crew-attention.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callsFile := filepath.Join(dir, "calls.log")
+	firstHub := filepath.Join(dir, "first-hub")
+	gen2Ready := filepath.Join(dir, "gen2-ready")
+	releaseLive := filepath.Join(dir, "release-live")
+	script := filepath.Join(dir, "rex-amq-adapter")
+	body := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> '%s'
+sess=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session" ]; then sess="$a"; fi
+  prev="$a"
+done
+case "$sess" in
+  session:p)
+    cat '%s'
+    if [ ! -e '%s' ]; then
+      touch '%s'
+      exec sleep 60
+    fi
+    touch '%s'
+    while [ ! -e '%s' ]; do sleep 0.02; done
+    cat '%s'
+    exec sleep 60
+    ;;
+  session:s)
+    cat '%s'
+    exec sleep 60
+    ;;
+  *) exit 1 ;;
+esac
+`, callsFile, hubSnap1, firstHub, firstHub, gen2Ready, releaseLive, hubSnap2, epicFixture)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inW.Close()
+	out := &syncBuffer{}
+	obs := &viewObserver{}
+	delayedEnter := make(chan tea.Cmd, 1)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runPanel(context.Background(), panelConfig{
+			Session:    "session:p",
+			AdapterBin: script,
+			CacheDir:   filepath.Join(dir, "cache"),
+			In:         inR,
+			Out:        out,
+			Width:      90,
+			Height:     48,
+			Options:    ui.Options{},
+			wrap: func(m tea.Model) tea.Model {
+				return reorderEnterEscModel{
+					observedModel: observedModel{Model: m, obs: obs},
+					delayedEnter:  delayedEnter,
+				}
+			},
+		})
+	}()
+
+	waitFor(t, "initial Hub Epics view", func() bool {
+		return strings.Contains(obs.current(), "billing")
+	})
+
+	// Send Enter (drillDown -> gen=1), holding its subscribe tea.Cmd.
+	inW.WriteString("\r")
+	var staleDrillCmd tea.Cmd
+	select {
+	case staleDrillCmd = <-delayedEnter:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Enter drillDown subscribe cmd")
+	}
+
+	// Send Esc (popBack -> gen=2) and wait until generation 2 is actively running.
+	inW.WriteString("\x1b")
+	waitFor(t, "generation 2 Hub stream active", func() bool {
+		_, err := os.Stat(gen2Ready)
+		return err == nil
+	})
+
+	// Now execute the delayed gen=1 drillDown cmd out of order; it must be ignored.
+	staleDrillCmd()
+
+	// Release a live update on the generation 2 Hub stream and verify it renders.
+	if err := os.WriteFile(releaseLive, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "live Hub update on generation 2 after stale gen=1 Switch", func() bool {
+		return strings.Contains(obs.current(), "live-hub-update")
+	})
+
+	inW.WriteString("Q")
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("panel ended with %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Q did not quit the panel")
+	}
+
+	b, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSpace(string(b)), "\n")
+	want := []string{
+		"stream panel --session session:p",
+		"stream panel --session session:p",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("adapter stream calls:\n got: %v\nwant: %v", got, want)
+	}
+}
+
 // sgrBackground applies an SGR's parameters to bg (whether a background
 // colour is set), refusing what it does not model: reverse video, and
 // extended colours whose arguments are not 5;n or 2;r;g;b in 0..255.

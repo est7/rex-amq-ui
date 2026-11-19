@@ -1,11 +1,14 @@
 package ui
 
 import (
+	"cmp"
 	"context"
 	"strings"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/est7/rex-amq-ui/internal/adapter"
 )
 
 // key handles a key press: the search box first while it is open, then
@@ -55,7 +58,28 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.stepBack() {
 			return m, nil
 		}
+		if m.DrilledDown() {
+			return m.popBack()
+		}
 		return m, m.minimize()
+	case "backspace":
+		if m.stepBack() {
+			return m, nil
+		}
+		if m.DrilledDown() {
+			return m.popBack()
+		}
+		return m, nil
+	case "s":
+		if m.DrilledDown() {
+			return m, m.switchToEpic(m.drill.epic)
+		}
+		if m.tab == TabEpics {
+			if e, ok := m.selectedEpic(); ok {
+				return m, m.switchToEpic(e)
+			}
+		}
+		return m, nil
 	case "enter":
 		return m.enter()
 	}
@@ -66,6 +90,10 @@ func (m Model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch m.tab {
+	case TabEpics:
+		if s == "o" {
+			return m, m.openEpicHandBack()
+		}
 	case TabOverview:
 		if s == "o" {
 			return m, m.openHandBack()
@@ -138,8 +166,8 @@ func (m *Model) stepBack() bool {
 	return false
 }
 
-// enter acts on the selected row: jump to a member's pane, switch to an
-// Epic's session, or open a message's excerpt.
+// enter acts on the selected row: jump to a member's pane, drill into an
+// Epic in-place, or open a message's excerpt.
 func (m Model) enter() (tea.Model, tea.Cmd) {
 	switch m.tab {
 	case TabMembers, TabOverview:
@@ -147,20 +175,26 @@ func (m Model) enter() (tea.Model, tea.Cmd) {
 			return m, m.focus(handle)
 		}
 	case TabEpics:
-		e, ok := m.selectedEpic()
-		if !ok {
-			return m, nil
-		}
-		session := e.SessionID
-		return m, m.act("switch to "+e.Name, true, func(ctx context.Context, c Controller) error { return c.SwitchTo(ctx, session) })
+		return m.drillDown()
 	case TabMail:
 		m.toggleExcerpt()
 	}
 	return m, nil
 }
 
+func (m *Model) switchToEpic(e adapter.Epic) tea.Cmd {
+	if e.SessionID == "" {
+		m.hint, m.hintBad = "epic has no session", true
+		return nil
+	}
+	name := cmp.Or(e.Name, e.SessionID)
+	session := e.SessionID
+	return m.act("switch to "+name, true, func(ctx context.Context, c Controller) error { return c.SwitchTo(ctx, session) })
+}
+
 // focus goes to handle's pane, minimizing the panel; without a pane it
-// says so in the footer.
+// says so in the footer. When drilled down into another session, it
+// switches the Rex app to that session and focuses the block there.
 func (m *Model) focus(handle string) tea.Cmd {
 	a, ok := m.agent(handle)
 	if !ok || a.Pane != "present" || a.BlockID == "" {
@@ -168,6 +202,14 @@ func (m *Model) focus(handle string) tea.Cmd {
 		return nil
 	}
 	block := a.BlockID
+	if m.DrilledDown() {
+		session := cmp.Or(a.SessionID, m.drill.epic.SessionID)
+		if session != "" && session != m.drill.hubSession {
+			return m.act("focus "+handle, true, func(ctx context.Context, c Controller) error {
+				return c.JumpToSession(ctx, session, block)
+			})
+		}
+	}
 	return m.act("focus "+handle, true, func(ctx context.Context, c Controller) error { return c.Jump(ctx, block) })
 }
 

@@ -80,10 +80,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "rex-amq-ui: no tab %q (want one of %s)\n", *tab, strings.Join(apc.Tabs, ", "))
 		return 2
 	}
+	sess := cmp(*session, os.Getenv("REX_SESSION"))
 	cfg := panelConfig{
-		Server: os.Getenv("REX_SERVER"), Session: cmp(*session, os.Getenv("REX_SESSION")), Block: os.Getenv("REX_BLOCK"),
+		Server: os.Getenv("REX_SERVER"), Session: sess, Block: os.Getenv("REX_BLOCK"),
 		AdapterBin: *adapterBin, CacheDir: cacheDir,
-		Options: ui.Options{Tab: *tab, Focused: *focus, Size: startPanelSize(*board, cacheDir)},
+		Options: ui.Options{Session: sess, Tab: *tab, Focused: *focus, Size: startPanelSize(*board, cacheDir)},
 		In: os.Stdin, Out: stdout,
 		Graphics: &ui.Graphics{Dir: kitty.DefaultDir, PID: os.Getpid()},
 	}
@@ -152,10 +153,16 @@ func runPanel(parent context.Context, cfg panelConfig) error {
 		g.Out = out
 		gfx = &g
 	}
+	uiOpts := cfg.Options
+	if uiOpts.Session == "" {
+		uiOpts.Session = cfg.Session
+	}
+	streams := newStreamManager(cfg.AdapterBin, cfg.Session)
 	model := ui.New(ui.Deps{
-		Layer: ctl, Clock: ui.SystemClock{}, Exec: execTool, LookPath: exec.LookPath,
+		Layer: ctl, Clock: ui.SystemClock{}, Subscribe: streams.Switch,
+		Exec: execTool, LookPath: exec.LookPath,
 		CacheDir: cfg.CacheDir, Editor: os.Getenv("EDITOR"), Graphics: gfx,
-	}, cfg.Options)
+	}, uiOpts)
 
 	in := apc.NewReader(cfg.In)
 	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(out),
@@ -178,7 +185,7 @@ func runPanel(parent context.Context, cfg panelConfig) error {
 	}
 
 	var wg sync.WaitGroup
-	wg.Go(func() { stream(ctx, cfg, prog) })
+	wg.Go(func() { streams.run(ctx, prog) })
 	if panel != nil {
 		wg.Go(func() { panel.Watch(ctx, func(s layer.State) { prog.Send(s) }) })
 	}
@@ -236,25 +243,124 @@ func lockOutput(w io.Writer) io.Writer {
 	return l
 }
 
-// stream runs the adapter and hands its updates to the panel.
-func stream(ctx context.Context, cfg panelConfig, prog *tea.Program) {
-	bin := cfg.AdapterBin
+type streamReq struct {
+	session string
+	gen     uint64
+}
+
+// streamManager owns the panel's active adapter.Stream and handles live
+// session switches: Switch cancels the running child stream and wakes the
+// supervisor, which waits for the previous adapter process to exit before
+// starting the next session's stream. Generations are monotonic; Switch
+// ignores requests at or below maxGen so asynchronous tea.Cmds executed out of
+// order cannot replace a newer subscription. Every update delivered to prog is
+// tagged with its subscription generation so late updates from a cancelled
+// stream are dropped by ui.Model.
+type streamManager struct {
+	bin string
+
+	mu     sync.Mutex
+	maxGen uint64
+	next   *streamReq
+	cancel context.CancelFunc
+	wake   chan struct{}
+}
+
+func newStreamManager(bin, initialSession string) *streamManager {
+	m := &streamManager{
+		bin:    bin,
+		maxGen: 0,
+		next:   &streamReq{session: initialSession, gen: 0},
+		wake:   make(chan struct{}, 1),
+	}
+	m.wake <- struct{}{}
+	return m
+}
+
+func (m *streamManager) Switch(session string, gen uint64) {
+	m.mu.Lock()
+	if gen <= m.maxGen {
+		m.mu.Unlock()
+		return
+	}
+	m.maxGen = gen
+	m.next = &streamReq{session: session, gen: gen}
+	cancel := m.cancel
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *streamManager) run(ctx context.Context, prog *tea.Program) {
+	bin := m.bin
 	if bin == "" {
 		var err error
 		if bin, err = adapter.ResolveBin(); err != nil {
-			prog.Send(adapter.StatusUpdate{Status: adapter.Reconnecting, Err: err})
+			m.mu.Lock()
+			gen := m.maxGen
+			m.mu.Unlock()
+			prog.Send(ui.StreamUpdate{Gen: gen, Update: adapter.StatusUpdate{Status: adapter.Reconnecting, Err: err}})
 			return
 		}
 	}
-	updates := make(chan adapter.Update)
-	go func() {
-		for u := range updates {
-			prog.Send(u)
+	for {
+		m.mu.Lock()
+		req := m.next
+		m.next = nil
+		if req == nil {
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return
+			case <-m.wake:
+				continue
+			}
 		}
-	}()
-	s := &adapter.Stream{Bin: bin, Session: cfg.Session}
+		childCtx, childCancel := context.WithCancel(ctx)
+		m.cancel = childCancel
+		m.mu.Unlock()
+
+		m.runOne(childCtx, bin, *req, prog)
+
+		m.mu.Lock()
+		m.cancel = nil
+		m.mu.Unlock()
+		childCancel()
+
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+func (m *streamManager) runOne(ctx context.Context, bin string, req streamReq, prog *tea.Program) {
+	updates := make(chan adapter.Update)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case u, ok := <-updates:
+				if !ok {
+					return
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				prog.Send(ui.StreamUpdate{Gen: req.gen, Update: u})
+			}
+		}
+	})
+	s := &adapter.Stream{Bin: bin, Session: req.session}
 	s.Run(ctx, updates)
 	close(updates)
+	wg.Wait()
 }
 
 // execTool runs a helper (md-viewer) to completion, its output kept off

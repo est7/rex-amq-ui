@@ -258,7 +258,7 @@ func (m Model) memberEntry(a adapter.Agent, i int) entry {
 		idx = fmt.Sprintf("%d ", i+1)
 	}
 	mark := Span{Text: "  "}
-	if a.BlockID != "" && a.BlockID == m.lay.Focused {
+	if !m.DrilledDown() && a.BlockID != "" && a.BlockID == m.lay.Focused {
 		mark = Span{Text: "▶ ", Fg: p.Aqua, Bold: true}
 	}
 	dot, dotFg := m.statusDot(a)
